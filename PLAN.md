@@ -6,19 +6,26 @@ the National Blend of Models (NBM) at held-out mountain stations by ML-correctin
 ## Milestones
 
 - **M0 — Scaffold** ✅ package, configs, CLI, CI, HF setup script.
-- **M1 — Stations + obs** — station catalogue (SNOTEL + Synoptic), obs downloaders
-  (NRCS/IEM/Synoptic), QC → parquet.
-- **M2 — Terrain** — Copernicus GLO-30 DEM; per-station elevation, elevation-delta vs
-  HRRR grid, slope, aspect, multi-scale TPI, Sx wind exposure; prunes flat sites.
-- **M3 — HRRR backfill** — extract HRRR-Zarr predictors at all stations, leads 1–48,
-  ~6 years, as a resumable GitHub Actions matrix → parquet on HF.
-- **M4 — Train v1** — LightGBM quantile models for temp/wind/gust/RH → HF Hub.
-- **M5 — Verify** — extract NBM; MAE/RMSE/CRPS vs NBM/HRRR/persistence at held-out
-  stations *and* months, by lead/elevation/season; skill report. **The benchmark moment.**
-- **M6 — Operations** — hourly forecast workflow, Pages JSON, demo map, tree60weather.com.
-- **M7 — Precip/snow** — two-stage models; SnowWatch `targets.py` QC + NOHRSC/MRMS truth.
-- **M8 — SnowWatch loop** — publish bias-corrected forcings at SNOTEL points.
-- **M9 — Iterate** — close verification gaps; optional RRFS predictors, gridded output.
+- **M1 — Stations + obs** ✅ SNOTEL (AWDB) + Synoptic catalogue, mountain filter; hourly
+  obs from SNOTEL/IEM/Synoptic; QC (range/step/flatline). CLI `stations`, `obs`.
+- **M2 — Terrain** ✅ Copernicus GLO-30 windowed reads; elevation, dem_elevation,
+  relief, slope, aspect, multi-scale TPI; relief filter finalizes the catalogue. `terrain`.
+- **M3 — HRRR backfill** ✅ pointwise KD-tree extraction from the dynamical.org zarr v3
+  archive (leads 0–48); resumable per-month matrix workflow → HF. `extract`.
+- **M4 — Train v1** ✅ LightGBM quantile models for temp/wind/gust/RH; no-leakage splits;
+  artifacts → HF. `train`, `build_training_table.py`, `train.yml`.
+- **M5 — Verify** ✅ NBM (Open-Meteo) + raw-HRRR + lapse + persistence baselines;
+  MAE/RMSE/CRPS/coverage by lead+elevation; paired bootstrap; skill report. `verify`.
+- **M6 — Operations** ✅ `predict` (latest cycle → forecast GeoJSON); Leaflet site;
+  hourly `forecast.yml` → Pages; HF Space demo (`site/space/`).
+- **M8 — SnowWatch loop** ✅ (partial) `export_forcings.py` emits bias-corrected SNOTEL
+  forcings for SnowWatch to ingest.
+- **M7 — Precip/snow** — *next*: two-stage models; SnowWatch `targets.py` QC + NOHRSC/MRMS.
+- **M9 — Iterate** — full-scale backfill run, tune features/models, optional RRFS/gridded.
+
+**Status:** the full pipeline is code-complete and unit-tested; the remaining work is
+running the full-scale backfill in Actions (needs `HF_TOKEN` + a public repo) and the
+phase-2 precip/snow models.
 
 ## Data sources
 

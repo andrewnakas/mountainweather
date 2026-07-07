@@ -63,6 +63,12 @@ def _cmd_predict(args: argparse.Namespace) -> int:
     return predict.main(args)
 
 
+def _cmd_export_forcings(args: argparse.Namespace) -> int:
+    from mtnwx import export_forcings
+
+    return export_forcings.main(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mtnwx", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -113,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_predict.add_argument("--init", default=None, help="HRRR init time (default: latest)")
     p_predict.add_argument("--out", default=None, help="Output JSON path")
     p_predict.set_defaults(func=_cmd_predict)
+
+    p_forcings = sub.add_parser("export-forcings", help="Export SNOTEL forcings for SnowWatch")
+    p_forcings.add_argument("--forecast", default=None, help="forecast.json path")
+    p_forcings.add_argument("--out", default=None, help="Output parquet path")
+    p_forcings.set_defaults(func=_cmd_export_forcings)
 
     return p
 
