@@ -1,0 +1,50 @@
+# HRRR predictor fields extracted at each station from the dynamical.org HRRR Zarr.
+# These are the raw model inputs to the ML post-processor. Variable names match the
+# archive exactly (see configs/variables.yaml note). The archive grid is Lambert
+# Conformal (dims: init_time, lead_time, y, x); 2-D latitude/longitude arrays map
+# grid cells to coordinates for the KD-tree station index.
+#
+# Store URL: https://data.dynamical.org/noaa/hrrr/forecast-48-hour/latest.zarr
+
+zarr_url: "https://data.dynamical.org/noaa/hrrr/forecast-48-hour/latest.zarr"
+
+# Fields pulled at the nearest grid point (and 3x3 neighborhood stats) per station.
+hrrr_fields:
+  - temperature_2m
+  - dew_point_temperature_2m
+  - relative_humidity_2m
+  - wind_u_10m
+  - wind_v_10m
+  - wind_u_80m            # 80 m wind: captures better-coupled flow above surface layer
+  - wind_v_80m
+  - wind_gust_surface
+  - precipitation_surface
+  - snowfall_surface
+  - snow_water_equivalent_surface
+  - snow_thickness_surface
+  - categorical_snow_surface
+  - categorical_rain_surface
+  - categorical_freezing_rain_surface
+  - percent_frozen_precipitation_surface
+  - total_cloud_cover_atmosphere
+  - downward_short_wave_radiation_flux_surface
+  - downward_long_wave_radiation_flux_surface
+  - pressure_surface
+  - pressure_reduced_to_mean_sea_level
+  - precipitable_water_atmosphere
+  - composite_reflectivity
+
+# Neighborhood aggregation: for each field also compute min/max/mean/std over the
+# 3x3 grid cells surrounding the nearest cell — cheap terrain-variability signal.
+neighborhood:
+  enabled: true
+  radius_cells: 1        # 1 -> 3x3 window
+  stats: [mean, min, max, std]
+
+# Grid-cell metadata to carry as features (the elevation delta is the single most
+# important mountain predictor).
+grid_metadata:
+  - grid_elevation_m       # HRRR model orography at the nearest cell (from a static field)
+  - grid_lat
+  - grid_lon
+  - grid_distance_m        # station-to-nearest-cell distance

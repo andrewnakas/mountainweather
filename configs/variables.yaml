@@ -1,0 +1,56 @@
+# Target variables and their HRRR-Zarr source fields.
+#
+# `zarr_name` is the variable name in the dynamical.org HRRR forecast-48-hour archive.
+# `obs_key`   is the canonical observation column our obs pipeline produces.
+# `phase`     controls training order: phase-1 (temp/wind/RH) ships first; phase-2
+#             (precip/snow) is the harder second training pass.
+#
+# Quantile levels are shared across variables for calibrated probabilistic output.
+
+quantiles: [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
+
+targets:
+  temperature_2m:
+    phase: 1
+    zarr_name: temperature_2m           # Kelvin in archive -> Celsius in features
+    obs_key: air_temp_c
+    units: celsius
+    lgbm_objective: quantile
+
+  wind_speed_10m:
+    phase: 1
+    # Derived from u/v components in the archive; see features/build.py
+    zarr_name: [wind_u_10m, wind_v_10m]
+    obs_key: wind_speed_ms
+    units: m_per_s
+    lgbm_objective: quantile
+
+  wind_gust_10m:
+    phase: 1
+    zarr_name: wind_gust_surface
+    obs_key: wind_gust_ms
+    units: m_per_s
+    lgbm_objective: quantile
+
+  relative_humidity_2m:
+    phase: 1
+    zarr_name: relative_humidity_2m      # present natively in the archive
+    obs_key: relative_humidity_pct
+    units: percent
+    lgbm_objective: quantile
+
+  precip_6h:
+    phase: 2
+    zarr_name: precipitation_surface     # accumulate to 6h windows
+    obs_key: precip_6h_mm
+    units: mm
+    lgbm_objective: quantile
+    two_stage: true                      # occurrence classifier + amount regressor
+
+  snowfall_6h:
+    phase: 2
+    zarr_name: snowfall_surface          # HRRR native variable-density snow
+    obs_key: snowfall_6h_cm
+    units: cm
+    lgbm_objective: quantile
+    two_stage: true

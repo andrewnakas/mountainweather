@@ -1,0 +1,20 @@
+# Region definition. Western CONUS mountains first (densest mountain obs on Earth,
+# fully inside the HRRR domain). Architecture is region-agnostic — expand by editing
+# this file. Bounds are a generous lon/lat box; per-station mountain filtering
+# (elevation + local relief) happens in station selection, not here.
+
+name: western_conus
+description: Western CONUS mountain zone (Cascades, Sierra, Rockies, Great Basin ranges)
+
+# Bounding box (WGS84). Kept slightly wide of the Rockies' east front.
+bounds:
+  lon_min: -125.0
+  lon_max: -103.0
+  lat_min: 31.0
+  lat_max: 49.5
+
+# Mountain-station selection thresholds (applied in stations.py).
+station_filter:
+  min_elevation_m: 1200        # valley floors of the interior west start here
+  min_local_relief_m: 300      # elevation range within ~10 km — screens out flat high desert
+  relief_radius_km: 10.0

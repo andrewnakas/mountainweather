@@ -1,0 +1,37 @@
+# Data artifacts (live on HF Hub, not in git)
+data/
+!data/.gitkeep
+*.parquet
+*.zarr/
+*.grib2
+*.nc
+
+# DEM tiles
+*.tif
+*.tiff
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Secrets — never commit
+.env
+*.token
