@@ -1,0 +1,107 @@
+name: HRRR backfill
+
+# Extract HRRR predictors at all stations, one job per init-month, uploading each
+# monthly parquet shard to the HF training dataset. Resumable: a month whose shard
+# already exists on HF is skipped. Manual dispatch controls the date range and the
+# max concurrent jobs (keep modest — each job is a separate client to dynamical.org).
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First init-month YYYY-MM"
+        default: "2019-01"
+      end:
+        description: "Last init-month YYYY-MM (blank = month before today)"
+        default: ""
+      max_parallel:
+        description: "Max concurrent extraction jobs"
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.gen.outputs.months }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: gen
+        run: |
+          END="${{ github.event.inputs.end }}"
+          if [ -z "$END" ]; then
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}")
+          else
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}" --end "$END")
+          fi
+          echo "months=$M" >> "$GITHUB_OUTPUT"
+
+  extract:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train]"
+
+      - name: Fetch station catalogue from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import download_dataset_snapshot
+          import shutil, glob, os
+          d = download_dataset_snapshot("stations")
+          os.makedirs("data", exist_ok=True)
+          # The catalogue with terrain is published as stations_terrain.parquet.
+          for f in glob.glob(os.path.join(d, "*.parquet")):
+              shutil.copy(f, "data/")
+          PY
+
+      - name: Skip if shard already on HF
+        id: check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["datasets"]["training"]
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          files = set(api.list_repo_files(repo, repo_type="dataset"))
+          target = f"hrrr/hrrr_${{ matrix.month }}.parquet"
+          print("exists" if target in files else "missing")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"exists={'1' if target in files else '0'}\n")
+          PY
+
+      - name: Extract month
+        if: steps.check.outputs.exists == '0'
+        run: python -m mtnwx.cli extract --month "${{ matrix.month }}" --workers 4
+
+      - name: Upload shard to HF
+        if: steps.check.outputs.exists == '0'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import upload_shard
+          m = "${{ matrix.month }}"
+          upload_shard(f"data/hrrr_{m}.parquet", f"hrrr/hrrr_{m}.parquet", which="training")
+          print("uploaded", m)
+          PY

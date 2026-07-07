@@ -33,6 +33,18 @@ def _cmd_obs(args: argparse.Namespace) -> int:
     return collect_obs.main(args)
 
 
+def _cmd_terrain(args: argparse.Namespace) -> int:
+    from mtnwx.data import terrain
+
+    return terrain.main(args)
+
+
+def _cmd_extract(args: argparse.Namespace) -> int:
+    from mtnwx.data import hrrr
+
+    return hrrr.main(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mtnwx", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -51,6 +63,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_obs.add_argument("--stations", default=None, help="Station parquet (default: data/stations.parquet)")
     p_obs.add_argument("--out", default=None, help="Output parquet path")
     p_obs.set_defaults(func=_cmd_obs)
+
+    p_terrain = sub.add_parser("terrain", help="Compute per-station DEM terrain features")
+    p_terrain.add_argument("--stations", default=None, help="Station parquet (default: data/stations.parquet)")
+    p_terrain.add_argument("--out", default=None, help="Output parquet path")
+    p_terrain.set_defaults(func=_cmd_terrain)
+
+    p_extract = sub.add_parser("extract", help="Extract HRRR predictors at stations (one month chunk)")
+    p_extract.add_argument("--month", required=True, help="Init-time month YYYY-MM")
+    p_extract.add_argument("--stations", default=None, help="Stations+terrain parquet")
+    p_extract.add_argument("--out", default=None, help="Output parquet path")
+    p_extract.add_argument("--workers", type=int, default=12, help="Concurrent init fetches")
+    p_extract.set_defaults(func=_cmd_extract)
 
     return p
 
