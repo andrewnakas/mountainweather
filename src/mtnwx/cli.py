@@ -45,6 +45,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return hrrr.main(args)
 
 
+def _cmd_train(args: argparse.Namespace) -> int:
+    from mtnwx import train
+
+    return train.main(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mtnwx", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -75,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument("--out", default=None, help="Output parquet path")
     p_extract.add_argument("--workers", type=int, default=12, help="Concurrent init fetches")
     p_extract.set_defaults(func=_cmd_extract)
+
+    p_train = sub.add_parser("train", help="Train LightGBM quantile post-processors")
+    p_train.add_argument("--table", default=None, help="Training table parquet")
+    p_train.add_argument("--targets", default=None, help="Comma-separated target list")
+    p_train.add_argument("--out", default=None, help="Model output dir")
+    p_train.set_defaults(func=_cmd_train)
 
     return p
 
