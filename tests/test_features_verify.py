@@ -110,6 +110,22 @@ def test_make_splits_no_leakage():
     assert not df.loc[tr, "station_id"].isin(held).any()
 
 
+def test_make_splits_short_span_leaves_training_data():
+    # A dataset shorter than holdout_months must still yield a non-empty train set
+    # (regression: a 45-day span with holdout_months=12 previously put every row in test).
+    n = 4000
+    df = pd.DataFrame(
+        {
+            "station_id": np.random.default_rng(1).choice(list("ABCDEFGHIJKLMNOP"), n),
+            "valid_time": pd.date_range("2024-01-01", periods=n, freq="15min"),  # ~42 days
+        }
+    )
+    tr, te, _ = make_splits(df, holdout_months=12, holdout_station_frac=0.2)
+    assert tr.sum() > 0, "train set must be non-empty for short spans"
+    assert te.sum() > 0, "test set must be non-empty"
+    assert not (tr & te).any()
+
+
 def test_lapse_correction_direction():
     # Station 150 m above grid -> lapse subtracts ~1 C from raw HRRR temp.
     df = pd.DataFrame({"temperature_2m": [5.0], "elevation_delta_m": [150.0]})

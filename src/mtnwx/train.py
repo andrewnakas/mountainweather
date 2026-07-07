@@ -36,9 +36,15 @@ def make_splits(
     """Return boolean masks (train, test). Test = recent months OR held-out stations.
 
     Using OR (not AND) for the test set means we measure generalization to unseen time
-    *and* unseen space; the train set is strictly the complement so there is no leakage."""
+    *and* unseen space; the train set is strictly the complement so there is no leakage.
+
+    The temporal cutoff is capped so it never swallows more than ~30% of the actual time
+    span — otherwise a dataset shorter than ``holdout_months`` (e.g. a smoke run) would
+    put every row in the test set and leave nothing to train on."""
     vt = pd.to_datetime(df["valid_time"])
-    cutoff = vt.max() - pd.DateOffset(months=holdout_months)
+    span_days = (vt.max() - vt.min()).days or 1
+    holdout_days = min(holdout_months * 30, int(span_days * 0.3))
+    cutoff = vt.max() - pd.Timedelta(days=holdout_days)
     recent = vt > cutoff
 
     stations = df["station_id"].unique()
@@ -58,12 +64,17 @@ def train_quantile_models(
     """Train one LightGBM booster per quantile for ``target``. Returns {q: booster}."""
     import lightgbm as lgb
 
-    sub = df.dropna(subset=[target])
+    sub = df.dropna(subset=[target]).reset_index(drop=True)
     train_mask, test_mask, _ = make_splits(sub)
     X = sub[feat_cols].astype("float32")
     y = sub[target].astype("float32")
     Xtr, ytr = X[train_mask], y[train_mask]
     Xval, yval = X[test_mask], y[test_mask]
+    if len(Xtr) == 0 or len(Xval) == 0:
+        raise ValueError(
+            f"empty split for {target}: train={len(Xtr)} val={len(Xval)} "
+            f"(dataset span may be too short for the holdout config)"
+        )
 
     boosters: dict[float, object] = {}
     for q in quantiles:
