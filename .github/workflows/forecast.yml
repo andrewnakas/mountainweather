@@ -1,0 +1,75 @@
+name: Forecast + Pages
+
+# Hourly: pull the latest HRRR cycle, load models from HF, emit forecast.json, and
+# publish the site (map + scorecard) to GitHub Pages. tree60weather.com reads the JSON.
+
+on:
+  schedule:
+    - cron: "20 * * * *"   # every hour at :20 (after HRRR cycles post)
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["site/**", ".github/workflows/forecast.yml"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train,terrain]"
+
+      - name: Fetch stations + models from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, glob, shutil
+          from huggingface_hub import snapshot_download
+          from mtnwx.config import load_configs
+          hub = load_configs()["hub"]
+          os.makedirs("data/models", exist_ok=True)
+          st = snapshot_download(repo_id=hub["datasets"]["stations"], repo_type="dataset")
+          for f in glob.glob(os.path.join(st, "*.parquet")):
+              shutil.copy(f, "data/")
+          md = snapshot_download(repo_id=hub["models"]["repo"], repo_type="model")
+          for f in glob.glob(os.path.join(md, "*")):
+              if os.path.isfile(f):
+                  shutil.copy(f, "data/models/")
+          print("stations + models ready")
+          PY
+
+      - name: Generate forecast
+        run: python -m mtnwx.cli predict --out site/forecast.json
+
+      - name: Copy scorecard into site (if present)
+        run: |
+          if [ -f data/verify/scorecard.json ]; then cp data/verify/scorecard.json site/; fi
+          if [ -f data/verify/skill_report.md ]; then cp data/verify/skill_report.md site/; fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: forecast
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>mtnwx — mountain weather forecasts</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { --bg:#0d1117; --panel:#161b22; --fg:#e6edf3; --accent:#58a6ff; --muted:#8b949e; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+           background:var(--bg); color:var(--fg); }
+    header { padding:12px 18px; background:var(--panel); border-bottom:1px solid #30363d;
+             display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+    header h1 { margin:0; font-size:18px; }
+    header .meta { color:var(--muted); font-size:13px; }
+    #map { height:60vh; width:100%; }
+    #panel { padding:14px 18px; }
+    .var-tabs { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+    .var-tabs button { background:var(--panel); color:var(--fg); border:1px solid #30363d;
+                       padding:6px 12px; border-radius:6px; cursor:pointer; font-size:13px; }
+    .var-tabs button.active { border-color:var(--accent); color:var(--accent); }
+    #detail { color:var(--muted); font-size:14px; }
+    table { border-collapse:collapse; margin-top:10px; font-size:13px; }
+    th,td { padding:4px 10px; text-align:right; border-bottom:1px solid #21262d; }
+    th:first-child, td:first-child { text-align:left; }
+    a { color:var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🏔 mtnwx</h1>
+    <span class="meta">Mountain weather post-processor — HRRR corrected for complex terrain.</span>
+    <span class="meta" id="init">loading…</span>
+  </header>
+  <div id="map"></div>
+  <div id="panel">
+    <div class="var-tabs" id="tabs"></div>
+    <div id="detail">Click a station on the map to see its forecast.</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const VAR_LABELS = {
+      air_temp_c: "Temperature (°C)",
+      wind_speed_ms: "Wind speed (m/s)",
+      wind_gust_ms: "Wind gust (m/s)",
+      relative_humidity_pct: "Humidity (%)",
+    };
+    let DATA = null, activeVar = "air_temp_c", activeStation = null;
+
+    const map = L.map("map").setView([42, -113], 5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 14, attribution: "© OpenStreetMap",
+    }).addTo(map);
+
+    fetch("forecast.json").then(r => r.json()).then(data => {
+      DATA = data;
+      document.getElementById("init").textContent =
+        "HRRR init " + (data.init_time || "?") + " · " + data.features.length + " stations";
+      buildTabs();
+      data.features.forEach(f => {
+        const [lon, lat] = f.geometry.coordinates;
+        if (lat == null) return;
+        const m = L.circleMarker([lat, lon], {
+          radius: 5, color: "#58a6ff", weight: 1, fillOpacity: 0.7,
+        }).addTo(map);
+        m.on("click", () => { activeStation = f; renderDetail(); });
+        m.bindTooltip(f.properties.name || f.properties.station_id);
+      });
+    }).catch(e => {
+      document.getElementById("detail").textContent =
+        "No forecast.json yet — the hourly workflow publishes it. (" + e + ")";
+    });
+
+    function buildTabs() {
+      const tabs = document.getElementById("tabs");
+      const vars = new Set();
+      DATA.features.forEach(f => Object.keys(f.properties.forecast || {}).forEach(v => vars.add(v)));
+      tabs.innerHTML = "";
+      [...vars].forEach(v => {
+        const b = document.createElement("button");
+        b.textContent = VAR_LABELS[v] || v;
+        b.className = v === activeVar ? "active" : "";
+        b.onclick = () => { activeVar = v; buildTabs(); renderDetail(); };
+        tabs.appendChild(b);
+      });
+    }
+
+    function renderDetail() {
+      const d = document.getElementById("detail");
+      if (!activeStation) { d.textContent = "Click a station on the map."; return; }
+      const p = activeStation.properties;
+      const fc = (p.forecast || {})[activeVar];
+      if (!fc) { d.textContent = "No " + activeVar + " forecast for this station."; return; }
+      let html = `<b>${p.name || p.station_id}</b> · ${p.elevation_m ? Math.round(p.elevation_m)+" m" : ""}`;
+      html += `<table><tr><th>Valid (UTC)</th><th>Forecast</th><th>q10–q90</th></tr>`;
+      const t = p.valid_times || [];
+      for (let i = 0; i < t.length && i < 48; i++) {
+        const pt = fc.point ? fc.point[i] : null;
+        const lo = fc.q10 ? fc.q10[i] : null, hi = fc.q90 ? fc.q90[i] : null;
+        html += `<tr><td>${t[i].slice(5,16).replace("T"," ")}</td>` +
+                `<td>${pt ?? "–"}</td>` +
+                `<td>${lo!=null&&hi!=null ? lo+" – "+hi : "–"}</td></tr>`;
+      }
+      html += `</table>`;
+      d.innerHTML = html;
+    }
+  </script>
+</body>
+</html>

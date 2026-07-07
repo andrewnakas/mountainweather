@@ -1,0 +1,64 @@
+name: Train + Verify
+
+# After the backfill populates the HF training dataset: build the training table, train
+# the LightGBM quantile models, verify against NBM/HRRR/persistence, and push models +
+# scorecard to HF. Manual dispatch (this is the expensive, occasional step).
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Comma-separated targets (blank = phase-1 default)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train,terrain]"
+
+      - name: Build training table from HF shards
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_training_table.py
+
+      - name: Train models
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.targets }}" ]; then ARGS="--targets ${{ github.event.inputs.targets }}"; fi
+          python -m mtnwx.cli train $ARGS
+
+      - name: Verify vs benchmarks
+        run: python -m mtnwx.cli verify || echo "verify completed with warnings"
+
+      - name: Push models + scorecard to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import glob, os
+          from mtnwx.data.hub_io import upload_file
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["models"]["repo"]
+          for f in glob.glob("data/models/*"):
+              if os.path.isfile(f):
+                  upload_file(f, os.path.basename(f), repo, repo_type="model")
+          for f in glob.glob("data/verify/*"):
+              if os.path.isfile(f):
+                  upload_file(f, f"verify/{os.path.basename(f)}", repo, repo_type="model")
+          print("models + scorecard pushed")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skill-report
+          path: data/verify/

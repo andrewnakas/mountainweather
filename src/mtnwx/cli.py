@@ -51,6 +51,18 @@ def _cmd_train(args: argparse.Namespace) -> int:
     return train.main(args)
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from mtnwx import run_verify
+
+    return run_verify.main(args)
+
+
+def _cmd_predict(args: argparse.Namespace) -> int:
+    from mtnwx import predict
+
+    return predict.main(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mtnwx", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -87,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--targets", default=None, help="Comma-separated target list")
     p_train.add_argument("--out", default=None, help="Model output dir")
     p_train.set_defaults(func=_cmd_train)
+
+    p_verify = sub.add_parser("verify", help="Score models vs NBM/HRRR/persistence + report")
+    p_verify.add_argument("--table", default=None, help="Training table parquet")
+    p_verify.add_argument("--models", default=None, help="Models dir")
+    p_verify.add_argument("--out", default=None, help="Report output dir")
+    p_verify.add_argument("--no-nbm", action="store_true", help="Skip the NBM benchmark fetch")
+    p_verify.set_defaults(func=_cmd_verify)
+
+    p_predict = sub.add_parser("predict", help="Forecast from the latest HRRR cycle")
+    p_predict.add_argument("--stations", default=None, help="Stations+terrain parquet")
+    p_predict.add_argument("--models", default=None, help="Models dir")
+    p_predict.add_argument("--init", default=None, help="HRRR init time (default: latest)")
+    p_predict.add_argument("--out", default=None, help="Output JSON path")
+    p_predict.set_defaults(func=_cmd_predict)
 
     return p
 

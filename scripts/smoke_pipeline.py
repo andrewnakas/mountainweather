@@ -30,6 +30,7 @@ def main() -> int:
     ap.add_argument("--start", default="2024-01-15")
     ap.add_argument("--end", default="2024-01-25")
     ap.add_argument("--month", default="2024-01")
+    ap.add_argument("--max-inits", type=int, default=6, help="Cap HRRR inits for a fast smoke run")
     args = ap.parse_args()
 
     cfg = load_configs()
@@ -46,12 +47,28 @@ def main() -> int:
     print(f"   {len(cat_t)} stations after relief filter; "
           f"terrain cols present: {[c for c in ('dem_elevation_m','slope_deg','tpi_2km') if c in cat_t]}")
 
-    print("== 3. HRRR extract (one month, all leads) ==")
-    hx = hrrr.extract_month(args.month, cat_t, workers=4)
-    # Restrict to the smoke window to keep it fast.
+    print("== 3. HRRR extract (limited inits for speed) ==")
+    # Extract only a few inits covering the window, so the smoke test is minutes not
+    # hours (the full backfill uses extract_month; here we bound the init list).
+    import xarray as xr
+
+    ds = hrrr.open_archive()
+    yi, xi, ok, dist = hrrr.build_grid_index(ds, cat_t, dd / "hrrr_grid_index.json")
+    st_ok = cat_t.loc[ok].reset_index(drop=True)
+    y_da = xr.DataArray(yi[ok], dims="station")
+    x_da = xr.DataArray(xi[ok], dims="station")
+    fields = load_configs()["predictors"]["hrrr_fields"]
+    all_inits = pd.to_datetime(ds.init_time.values)
+    lo, hi = pd.Timestamp(args.start), pd.Timestamp(args.end)
+    # Inits whose 48 h horizon overlaps the window; cap at args.max_inits for speed.
+    sel = all_inits[(all_inits >= lo - pd.Timedelta(hours=48)) & (all_inits <= hi)]
+    sel = list(sel[:: max(1, len(sel) // args.max_inits)])[: args.max_inits]
+    print(f"   extracting {len(sel)} inits x {len(fields)} fields x {len(st_ok)} stations")
+    frames = [hrrr._extract_one_init(ds, it, fields, y_da, x_da) for it in sel]
+    hx = pd.concat(frames, ignore_index=True)
+    hx["station_id"] = st_ok["station_id"].to_numpy()[hx["station_ix"].to_numpy()]
+    hx = hx.drop(columns="station_ix")
     hx["valid_time"] = pd.to_datetime(hx["init_time"]) + pd.to_timedelta(hx["lead_hour"], unit="h")
-    lo = pd.Timestamp(args.start)
-    hi = pd.Timestamp(args.end)
     hx = hx[(hx["valid_time"] >= lo) & (hx["valid_time"] <= hi)]
     print(f"   {len(hx)} predictor rows in window")
 
