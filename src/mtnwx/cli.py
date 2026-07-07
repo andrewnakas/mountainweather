@@ -27,6 +27,12 @@ def _cmd_stations(args: argparse.Namespace) -> int:
     return stations.main(args)
 
 
+def _cmd_obs(args: argparse.Namespace) -> int:
+    from mtnwx.data import collect_obs
+
+    return collect_obs.main(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mtnwx", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -38,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_stations.add_argument("--limit", type=int, default=None, help="Cap station count (smoke test)")
     p_stations.add_argument("--out", type=str, default=None, help="Output parquet path")
     p_stations.set_defaults(func=_cmd_stations)
+
+    p_obs = sub.add_parser("obs", help="Collect + QC hourly observations for the catalogue")
+    p_obs.add_argument("--start", required=True, help="Start date YYYY-MM-DD (UTC)")
+    p_obs.add_argument("--end", required=True, help="End date YYYY-MM-DD (UTC, inclusive)")
+    p_obs.add_argument("--stations", default=None, help="Station parquet (default: data/stations.parquet)")
+    p_obs.add_argument("--out", default=None, help="Output parquet path")
+    p_obs.set_defaults(func=_cmd_obs)
 
     return p
 
