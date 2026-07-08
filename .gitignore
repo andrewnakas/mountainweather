@@ -1,6 +1,7 @@
-# Data artifacts (live on HF Hub, not in git)
-data/
-!data/.gitkeep
+# Data artifacts (live on HF Hub, not in git). Anchored to repo root with a
+# leading slash so it does NOT match the src/mtnwx/data source subpackage.
+/data/
+!/data/.gitkeep
 *.parquet
 *.zarr/
 *.grib2
