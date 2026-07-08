@@ -33,6 +33,7 @@ jobs:
         run: pip install -e ".[train,terrain]"
 
       - name: Fetch stations + models from HF
+        id: fetch
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -42,17 +43,31 @@ jobs:
           from mtnwx.config import load_configs
           hub = load_configs()["hub"]
           os.makedirs("data/models", exist_ok=True)
-          st = snapshot_download(repo_id=hub["datasets"]["stations"], repo_type="dataset")
-          for f in glob.glob(os.path.join(st, "*.parquet")):
-              shutil.copy(f, "data/")
-          md = snapshot_download(repo_id=hub["models"]["repo"], repo_type="model")
-          for f in glob.glob(os.path.join(md, "*")):
-              if os.path.isfile(f):
-                  shutil.copy(f, "data/models/")
-          print("stations + models ready")
+          ready = True
+          # Stations + trained models may not exist yet (before the first backfill+train).
+          # Degrade gracefully so the site still deploys with a "warming up" state.
+          try:
+              st = snapshot_download(repo_id=hub["datasets"]["stations"], repo_type="dataset")
+              for f in glob.glob(os.path.join(st, "*.parquet")):
+                  shutil.copy(f, "data/")
+              md = snapshot_download(repo_id=hub["models"]["repo"], repo_type="model")
+              has_model = False
+              for f in glob.glob(os.path.join(md, "*")):
+                  if os.path.isfile(f):
+                      shutil.copy(f, "data/models/")
+                      if f.endswith(".pkl"):
+                          has_model = True
+              ready = has_model and bool(glob.glob("data/*.parquet"))
+          except Exception as e:
+              print(f"stations/models not available yet: {e}")
+              ready = False
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"ready={'1' if ready else '0'}\n")
+          print("forecast inputs ready" if ready else "no models yet — deploying site shell")
           PY
 
       - name: Generate forecast
+        if: steps.fetch.outputs.ready == '1'
         run: python -m mtnwx.cli predict --out site/forecast.json
 
       - name: Copy scorecard into site (if present)

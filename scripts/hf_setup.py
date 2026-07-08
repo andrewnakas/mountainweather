@@ -55,7 +55,9 @@ def main() -> int:
     for repo_type, repo_id in plan:
         kwargs = {"repo_id": repo_id, "repo_type": repo_type, "exist_ok": True}
         if repo_type == "space":
-            kwargs["space_sdk"] = "gradio"
+            # Static Spaces are free; Gradio/Docker Spaces need a PRO plan. Our demo is
+            # a self-contained JS map that reads forecast.json, so static is a perfect fit.
+            kwargs["space_sdk"] = "static"
         url = api.create_repo(**kwargs)
         print(f"  ✓ {repo_type:8s} {repo_id}  ->  {url}")
 

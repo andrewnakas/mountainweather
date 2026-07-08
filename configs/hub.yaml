@@ -1,20 +1,19 @@
 # Hugging Face Hub destinations. All data + model artifacts live here (per project
-# decision). Repo IDs are placeholders under the user's HF namespace — set the real
-# namespace at M0 once the HF handle is known, and create these repos with
-# scripts/hf_setup.py.
+# decision). Create these repos with scripts/hf_setup.py (uses HF_TOKEN or the
+# logged-in HF CLI credentials).
 
-hf_namespace: "tree60weather"            # TODO(M0): confirm actual HF username/org
+hf_namespace: "nakas"
 
 datasets:
-  training:   "tree60weather/mtnwx-training"    # parquet training shards (HRRR x obs x terrain)
-  stations:   "tree60weather/mtnwx-stations"    # station catalogue + terrain features
-  verify:     "tree60weather/mtnwx-verify"      # NBM/baseline extractions for verification
+  training:   "nakas/mtnwx-training"    # parquet training shards (HRRR x obs x terrain)
+  stations:   "nakas/mtnwx-stations"    # station catalogue + terrain features
+  verify:     "nakas/mtnwx-verify"      # NBM/baseline extractions for verification
 
 models:
-  repo:       "tree60weather/mtnwx-models"      # versioned LightGBM artifacts + metadata
+  repo:       "nakas/mtnwx-models"      # versioned LightGBM artifacts + metadata
 
 space:
-  demo:       "tree60weather/mtnwx-demo"        # Gradio/static demo Space (forecast map + skill report)
+  demo:       "nakas/mtnwx-demo"        # Gradio/static demo Space (forecast map + skill report)
 
-# Existing user HF datasets to inventory/reuse (fill in at M0).
+# Existing user HF datasets to inventory/reuse (fill in if any).
 existing_datasets: []
