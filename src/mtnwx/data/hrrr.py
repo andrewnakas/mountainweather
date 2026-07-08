@@ -97,7 +97,6 @@ def month_init_times(ds, month: str) -> pd.DatetimeIndex:
 
 def _extract_one_init(ds, init, fields, y_da, x_da):
     """Return a long DataFrame for one init: rows = station x lead, cols = fields."""
-    import xarray as xr
 
     sub = ds[fields].sel(init_time=init).isel(y=y_da, x=x_da).compute()
     lead_h = (ds.lead_time.values / np.timedelta64(1, "h")).astype("int32")
