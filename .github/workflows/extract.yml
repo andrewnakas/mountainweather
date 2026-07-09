@@ -58,6 +58,17 @@ jobs:
       - name: Install
         run: pip install -e ".[train]"
 
+      - name: Require HF_TOKEN (uploads need it)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is empty or unset. Set it with:"
+            echo "  gh secret set HF_TOKEN --repo <owner>/mountainweather"
+            exit 1
+          fi
+          echo "HF_TOKEN present (len ${#HF_TOKEN})"
+
       - name: Fetch station catalogue from HF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -82,8 +93,15 @@ jobs:
           from huggingface_hub import HfApi
           from mtnwx.config import load_configs
           repo = load_configs()["hub"]["datasets"]["training"]
-          api = HfApi(token=os.environ["HF_TOKEN"])
-          files = set(api.list_repo_files(repo, repo_type="dataset"))
+          # Public repo -> tokenless read works; pass None (not "") to avoid a
+          # 'Bearer ' illegal-header error when the secret is empty/unset.
+          token = os.environ.get("HF_TOKEN") or None
+          api = HfApi(token=token)
+          try:
+              files = set(api.list_repo_files(repo, repo_type="dataset"))
+          except Exception as e:
+              print(f"could not list {repo} ({e}); assuming shard missing")
+              files = set()
           target = f"hrrr/hrrr_${{ matrix.month }}.parquet"
           print("exists" if target in files else "missing")
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
