@@ -95,10 +95,26 @@ def month_init_times(ds, month: str) -> pd.DatetimeIndex:
     return all_inits[(all_inits >= start) & (all_inits < end)]
 
 
-def _extract_one_init(ds, init, fields, y_da, x_da):
-    """Return a long DataFrame for one init: rows = station x lead, cols = fields."""
+def _extract_one_init(ds, init, fields, y_da, x_da, *, retries: int = 4):
+    """Return a long DataFrame for one init: rows = station x lead, cols = fields.
 
-    sub = ds[fields].sel(init_time=init).isel(y=y_da, x=x_da).compute()
+    The ``.compute()`` fetches chunks over HTTP from the dynamical.org archive; under
+    the 20-way matrix backfill those reads intermittently time out or get throttled.
+    Retry with exponential backoff so one flaky read doesn't fail the whole month."""
+    import time
+
+    last: Exception | None = None
+    for attempt in range(retries):
+        try:
+            sub = ds[fields].sel(init_time=init).isel(y=y_da, x=x_da).compute()
+            break
+        except Exception as exc:  # noqa: BLE001 — any transport/read error is retryable
+            last = exc
+            if attempt < retries - 1:
+                time.sleep(2**attempt + 1)  # 2, 3, 5, 9 s
+    else:
+        raise RuntimeError(f"extract failed for init {init} after {retries} tries") from last
+
     lead_h = (ds.lead_time.values / np.timedelta64(1, "h")).astype("int32")
     n_lead, n_st = sub[fields[0]].shape
     # Build the long frame column by column (float32 to keep memory down).
