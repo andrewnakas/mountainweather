@@ -10,6 +10,9 @@ on:
       targets:
         description: "Comma-separated targets (blank = phase-1 default)"
         default: ""
+      months:
+        description: "Comma-separated YYYY-MM subset (blank = all; use for a probe)"
+        default: ""
 
 permissions:
   contents: read
@@ -29,7 +32,10 @@ jobs:
       - name: Build training table from HF shards
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/build_training_table.py
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.months }}" ]; then ARGS="--months ${{ github.event.inputs.months }}"; fi
+          python scripts/build_training_table.py $ARGS
 
       - name: Train models
         run: |
