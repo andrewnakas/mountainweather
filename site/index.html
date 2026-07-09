@@ -54,24 +54,35 @@
       maxZoom: 14, attribution: "© OpenStreetMap",
     }).addTo(map);
 
-    fetch("forecast.json").then(r => r.json()).then(data => {
-      DATA = data;
-      document.getElementById("init").textContent =
-        "HRRR init " + (data.init_time || "?") + " · " + data.features.length + " stations";
-      buildTabs();
-      data.features.forEach(f => {
-        const [lon, lat] = f.geometry.coordinates;
-        if (lat == null) return;
-        const m = L.circleMarker([lat, lon], {
-          radius: 5, color: "#58a6ff", weight: 1, fillOpacity: 0.7,
-        }).addTo(map);
-        m.on("click", () => { activeStation = f; renderDetail(); });
-        m.bindTooltip(f.properties.name || f.properties.station_id);
+    fetch("forecast.json")
+      .then(r => {
+        // Before the first backfill+train run, forecast.json doesn't exist yet and
+        // GitHub Pages serves a 404 HTML page — don't try to JSON-parse that.
+        if (!r.ok) throw new Error("warming-up");
+        return r.json();
+      })
+      .then(data => {
+        DATA = data;
+        document.getElementById("init").textContent =
+          "HRRR init " + (data.init_time || "?") + " · " + data.features.length + " stations";
+        buildTabs();
+        data.features.forEach(f => {
+          const [lon, lat] = f.geometry.coordinates;
+          if (lat == null) return;
+          const m = L.circleMarker([lat, lon], {
+            radius: 5, color: "#58a6ff", weight: 1, fillOpacity: 0.7,
+          }).addTo(map);
+          m.on("click", () => { activeStation = f; renderDetail(); });
+          m.bindTooltip(f.properties.name || f.properties.station_id);
+        });
+      })
+      .catch(() => {
+        document.getElementById("init").textContent = "warming up";
+        document.getElementById("detail").innerHTML =
+          "<b>The model is warming up.</b> Live forecasts appear here once the first " +
+          "HRRR backfill and training run complete. The hourly workflow publishes " +
+          "<code>forecast.json</code> automatically — check back soon.";
       });
-    }).catch(e => {
-      document.getElementById("detail").textContent =
-        "No forecast.json yet — the hourly workflow publishes it. (" + e + ")";
-    });
 
     function buildTabs() {
       const tabs = document.getElementById("tabs");
