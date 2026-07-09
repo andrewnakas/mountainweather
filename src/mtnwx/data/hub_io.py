@@ -12,12 +12,22 @@ from pathlib import Path
 from mtnwx.config import load_configs
 
 
-def _api():
+def _token(required: bool = True) -> str | None:
+    """HF token from env, falling back to the logged-in CLI credential.
+
+    Required for writes; optional for reads (our dataset/model repos are public)."""
+    from huggingface_hub import get_token
+
+    token = os.environ.get("HF_TOKEN") or get_token()
+    if not token and required:
+        raise RuntimeError("HF_TOKEN not set (and no logged-in HF CLI credential)")
+    return token
+
+
+def _api(required: bool = True):
     from huggingface_hub import HfApi
 
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        raise RuntimeError("HF_TOKEN not set")
+    token = _token(required=required)
     return HfApi(token=token), token
 
 
@@ -46,7 +56,7 @@ def download_dataset_snapshot(which: str = "training", local_dir: str | Path | N
     from huggingface_hub import snapshot_download
 
     repo_id = load_configs()["hub"]["datasets"][which]
-    _, token = _api()
+    token = _token(required=False)  # public repos download without a token
     return snapshot_download(
         repo_id=repo_id, repo_type="dataset", local_dir=str(local_dir) if local_dir else None, token=token
     )
