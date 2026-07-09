@@ -1,0 +1,48 @@
+name: Build station catalogue
+
+# Build the mountain station catalogue (SNOTEL + optional Synoptic), compute terrain
+# features from the Copernicus DEM, and publish stations_terrain.parquet to the HF
+# stations dataset. Runs on Actions because the DEM COG reads are fast from AWS-adjacent
+# runners (slow from a home connection). Run once, then re-run when the station set
+# changes. The backfill and training read the published catalogue.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 1 * *"   # monthly, in case new SNOTEL sites come online
+
+permissions:
+  contents: read
+
+jobs:
+  catalogue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train,terrain]"
+
+      - name: Build stations
+        env:
+          SYNOPTIC_API_TOKEN: ${{ secrets.SYNOPTIC_API_TOKEN }}
+        run: python -m mtnwx.cli stations --out data/stations.parquet
+
+      - name: Compute terrain features
+        run: python -m mtnwx.cli terrain --stations data/stations.parquet --out data/stations_terrain.parquet
+
+      - name: Publish catalogue to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import upload_file
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["datasets"]["stations"]
+          upload_file("data/stations.parquet", "stations.parquet", repo, repo_type="dataset")
+          upload_file("data/stations_terrain.parquet", "stations_terrain.parquet", repo, repo_type="dataset")
+          print("published stations + terrain catalogue")
+          PY
