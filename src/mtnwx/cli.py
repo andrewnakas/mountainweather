@@ -111,6 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--models", default=None, help="Models dir")
     p_verify.add_argument("--out", default=None, help="Report output dir")
     p_verify.add_argument("--no-nbm", action="store_true", help="Skip the NBM benchmark fetch")
+    p_verify.add_argument("--nbm-stations", type=int, default=60,
+                          help="Cap NBM benchmark to a random sample of N held-out stations (0=all)")
     p_verify.set_defaults(func=_cmd_verify)
 
     p_predict = sub.add_parser("predict", help="Forecast from the latest HRRR cycle")

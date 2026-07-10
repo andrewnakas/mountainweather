@@ -38,6 +38,9 @@ def _load_models(models_dir: Path):
 
 
 def main(args: argparse.Namespace) -> int:
+    # Default NBM sample cap when the attribute isn't provided (programmatic calls).
+    if not hasattr(args, "nbm_stations"):
+        args.nbm_stations = 60
     table_path = Path(args.table) if args.table else data_dir() / "training_table.parquet"
     models_dir = Path(args.models) if args.models else data_dir() / "models"
     df = pd.read_parquet(table_path)
@@ -58,6 +61,13 @@ def main(args: argparse.Namespace) -> int:
             pd.read_parquet(data_dir() / "stations_terrain.parquet")[["station_id", "lat", "lon"]],
             on="station_id", how="left",
         ).dropna(subset=["lat", "lon"])
+        # NBM comes from the Open-Meteo archive API (per-station, rate-limited). A
+        # random sample of held-out stations gives a statistically sound benchmark MAE
+        # without querying hundreds of stations over 7 years (which is slow / hits
+        # rate limits). Cap configurable via --nbm-stations.
+        if args.nbm_stations and len(st) > args.nbm_stations:
+            st = st.sample(n=args.nbm_stations, random_state=17).reset_index(drop=True)
+            print(f"NBM benchmark sampled to {len(st)} held-out stations")
         try:
             nbm = fetch_nbm_for_stations(st, vt.min().date(), vt.max().date())
             nbm["valid_time"] = pd.to_datetime(nbm["valid_time"])
