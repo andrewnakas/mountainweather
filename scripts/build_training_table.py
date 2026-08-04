@@ -61,11 +61,16 @@ def main() -> int:
     start = pd.Timestamp(months[0] + "-01").date()
     end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
 
-    # 1. Observations for the whole window (hourly; the join key). Collecting 788
-    # stations x 7 years is slow, so cache the result on the HF verify dataset keyed
-    # by the window — re-runs (and recovery after a teardown) reuse it instead of
-    # re-fetching. Disable with --no-obs-cache.
-    obs_key = f"obs/obs_{start}_{end}.parquet"
+    # 1. Observations for the whole window (hourly; the join key). Collecting the full
+    # station set x 7 years is slow, so cache the result on the HF verify dataset — keyed
+    # by the window AND the station set (count + a short id hash) so adding stations
+    # (e.g. ASOS) invalidates the cache and re-collects. Disable with --no-obs-cache.
+    import hashlib
+
+    sid_hash = hashlib.md5(
+        "|".join(sorted(stations["station_id"].astype(str))).encode()
+    ).hexdigest()[:8]
+    obs_key = f"obs/obs_{start}_{end}_n{len(stations)}_{sid_hash}.parquet"
     obs = None
     if not args.no_obs_cache and not args.local_shards:
         try:

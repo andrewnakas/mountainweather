@@ -1,0 +1,115 @@
+name: HRRR backfill (ASOS)
+
+# Extract HRRR predictors at the ASOS stations only, into a separate asos/ shard set on
+# the training dataset. Keeps the existing SNOTEL hrrr/ shards untouched (they're done);
+# the training-table builder reads both hrrr/ and asos/. Resumable: skips ASOS shards
+# already present.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First init-month YYYY-MM"
+        default: "2019-01"
+      end:
+        description: "Last init-month YYYY-MM (blank = month before today)"
+        default: ""
+      max_parallel:
+        description: "Max concurrent extraction jobs"
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.gen.outputs.months }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: gen
+        run: |
+          END="${{ github.event.inputs.end }}"
+          if [ -z "$END" ]; then
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}")
+          else
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}" --end "$END")
+          fi
+          echo "months=$M" >> "$GITHUB_OUTPUT"
+
+  extract:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train]"
+
+      - name: Require HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then echo "::error::HF_TOKEN empty"; exit 1; fi
+
+      - name: Fetch station catalogue from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import download_dataset_snapshot
+          import shutil, glob, os
+          d = download_dataset_snapshot("stations")
+          os.makedirs("data", exist_ok=True)
+          for f in glob.glob(os.path.join(d, "*.parquet")):
+              shutil.copy(f, "data/")
+          PY
+
+      - name: Skip if ASOS shard already on HF
+        id: check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["datasets"]["training"]
+          token = os.environ.get("HF_TOKEN") or None
+          api = HfApi(token=token)
+          try:
+              files = set(api.list_repo_files(repo, repo_type="dataset"))
+          except Exception:
+              files = set()
+          target = f"asos/hrrr_${{ matrix.month }}.parquet"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"exists={'1' if target in files else '0'}\n")
+          PY
+
+      - name: Extract month (ASOS only)
+        if: steps.check.outputs.exists == '0'
+        run: python -m mtnwx.cli extract --month "${{ matrix.month }}" --network ASOS --workers 4
+
+      - name: Upload ASOS shard to HF
+        if: steps.check.outputs.exists == '0'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import upload_shard
+          m = "${{ matrix.month }}"
+          upload_shard(f"data/hrrr_{m}.parquet", f"asos/hrrr_{m}.parquet", which="training")
+          print("uploaded ASOS", m)
+          PY

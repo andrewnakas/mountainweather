@@ -98,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument("--stations", default=None, help="Stations+terrain parquet")
     p_extract.add_argument("--out", default=None, help="Output parquet path")
     p_extract.add_argument("--workers", type=int, default=12, help="Concurrent init fetches")
+    p_extract.add_argument("--network", default=None, help="Only extract this network (e.g. ASOS)")
     p_extract.set_defaults(func=_cmd_extract)
 
     p_train = sub.add_parser("train", help="Train LightGBM quantile post-processors")

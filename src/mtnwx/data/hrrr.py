@@ -186,6 +186,17 @@ def main(args: argparse.Namespace) -> int:
             return 1
     stations = pd.read_parquet(stations_path)
 
+    # Optional network filter — lets us extract only the newly-added ASOS points into a
+    # separate shard set without re-extracting the SNOTEL stations already on HF.
+    net = getattr(args, "network", None)
+    if net:
+        before = len(stations)
+        stations = stations[stations["network"].astype(str).str.upper() == net.upper()]
+        print(f"network={net}: {len(stations)}/{before} stations")
+        if stations.empty:
+            print("No stations match the network filter; nothing to do.")
+            return 0
+
     df = extract_month(args.month, stations, workers=args.workers)
     if df.empty:
         print("No data extracted; nothing written.")
