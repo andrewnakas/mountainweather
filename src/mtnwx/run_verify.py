@@ -45,7 +45,10 @@ def main(args: argparse.Namespace) -> int:
 
     table_path = Path(args.table) if args.table else data_dir() / "training_table"
     models_dir = Path(args.models) if args.models else data_dir() / "models"
-    df = _load_table(table_path, max_rows=getattr(args, "max_rows", 40_000_000))
+    # Verify only needs enough held-out rows for stable MAE/CRPS estimates — far fewer
+    # than training. Cap load (default 3M) so scoring 28 quantile models stays in memory.
+    max_rows = getattr(args, "verify_rows", getattr(args, "max_rows", 3_000_000))
+    df = _load_table(table_path, max_rows=max_rows)
     if df is None:
         print(f"ERROR: training table not found at {table_path}")
         return 1
