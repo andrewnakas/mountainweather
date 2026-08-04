@@ -46,18 +46,28 @@ def _fetch_one(row: pd.Series, start: date, end: date, token: str | None) -> pd.
 
 
 def collect(
-    stations: pd.DataFrame, start: date, end: date, *, token: str | None = None
+    stations: pd.DataFrame, start: date, end: date, *, token: str | None = None,
+    workers: int = 8,
 ) -> pd.DataFrame:
-    """Fetch + QC hourly obs for every station in ``stations`` over [start, end]."""
+    """Fetch + QC hourly obs for every station in ``stations`` over [start, end].
+
+    Fetches are network-bound and the obs providers (AWDB/IEM/Synoptic) tolerate
+    concurrent requests, so stations are pulled with a bounded thread pool — serial
+    collection of 788 stations over 7 years was the slowest stage of the full run."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    rows = [row for _, row in stations.iterrows()]
+    n = len(rows)
     frames: list[pd.DataFrame] = []
-    n = len(stations)
-    for i, (_, row) in enumerate(stations.iterrows(), 1):
-        df = _fetch_one(row, start, end, token)
-        if not df.empty:
-            frames.append(obs.normalize_hourly(df))
-        if i % 50 == 0 or i == n:
-            got = sum(len(f) for f in frames)
-            print(f"  [{i}/{n}] stations processed, {got} obs rows so far")
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for df in ex.map(lambda r: _fetch_one(r, start, end, token), rows):
+            done += 1
+            if not df.empty:
+                frames.append(obs.normalize_hourly(df))
+            if done % 100 == 0 or done == n:
+                got = sum(len(f) for f in frames)
+                print(f"  [{done}/{n}] stations processed, {got} obs rows so far")
     if not frames:
         return obs._empty()
     allobs = pd.concat(frames, ignore_index=True)
