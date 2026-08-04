@@ -56,18 +56,36 @@ def collect(
     collection of 788 stations over 7 years was the slowest stage of the full run."""
     from concurrent.futures import ThreadPoolExecutor
 
-    rows = [row for _, row in stations.iterrows()]
-    n = len(rows)
     frames: list[pd.DataFrame] = []
+
+    # ASOS obs come from one bulk DuckDB query for all ASOS stations at once (not
+    # per-station), so pull them together rather than through the per-station path.
+    is_asos = stations["station_id"].astype(str).str.startswith("ASOS:")
+    asos_ids = stations.loc[is_asos, "station_id"].astype(str).tolist()
+    if asos_ids:
+        try:
+            from mtnwx.data.asos import fetch_asos_hourly
+
+            adf = fetch_asos_hourly(asos_ids, start, end)
+            if not adf.empty:
+                frames.append(obs.normalize_hourly(adf))
+            print(f"  ASOS: {len(adf)} obs rows from {len(asos_ids)} stations")
+        except Exception as exc:  # noqa: BLE001 — ASOS is additive
+            print(f"  WARN: ASOS obs fetch failed ({exc})")
+
+    other = stations.loc[~is_asos]
+    rows = [row for _, row in other.iterrows()]
+    n = len(rows)
     done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for df in ex.map(lambda r: _fetch_one(r, start, end, token), rows):
-            done += 1
-            if not df.empty:
-                frames.append(obs.normalize_hourly(df))
-            if done % 100 == 0 or done == n:
-                got = sum(len(f) for f in frames)
-                print(f"  [{done}/{n}] stations processed, {got} obs rows so far")
+    if n:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for df in ex.map(lambda r: _fetch_one(r, start, end, token), rows):
+                done += 1
+                if not df.empty:
+                    frames.append(obs.normalize_hourly(df))
+                if done % 100 == 0 or done == n:
+                    got = sum(len(f) for f in frames)
+                    print(f"  [{done}/{n}] stations processed, {got} obs rows so far")
     if not frames:
         return obs._empty()
     allobs = pd.concat(frames, ignore_index=True)

@@ -153,6 +153,18 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
 
     rows = fetch_snotel_stations()
 
+    # ASOS/AWOS airports (incl. high mountain passes) from dynamical.org — the wind &
+    # gust ground truth SNOTEL lacks. Additive; skip on any failure.
+    if not getattr(build_catalogue, "_no_asos", False):
+        try:
+            from mtnwx.data.asos import select_stations as asos_select
+
+            asos = asos_select(region["bounds"])
+            rows += asos.to_dict("records")
+            print(f"NOTE: added {len(asos)} ASOS stations")
+        except Exception as exc:  # noqa: BLE001 — ASOS is additive
+            print(f"WARN: ASOS fetch failed ({exc}); continuing without it")
+
     token = os.environ.get("SYNOPTIC_API_TOKEN")
     if token:
         try:
@@ -160,7 +172,7 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
         except Exception as exc:  # noqa: BLE001 — Synoptic is optional
             print(f"WARN: Synoptic fetch failed ({exc}); continuing with SNOTEL only")
     else:
-        print("NOTE: SYNOPTIC_API_TOKEN not set; SNOTEL-only catalogue")
+        print("NOTE: SYNOPTIC_API_TOKEN not set; SNOTEL+ASOS catalogue")
 
     df = pd.DataFrame(rows).dropna(subset=["lat", "lon"])
     # Dedupe by rounded location (some networks double-list co-located sensors).
