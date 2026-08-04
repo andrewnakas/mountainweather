@@ -64,17 +64,29 @@ def train_quantile_models(
     """Train one LightGBM booster per quantile for ``target``. Returns {q: booster}."""
     import lightgbm as lgb
 
-    sub = df.dropna(subset=[target]).reset_index(drop=True)
-    train_mask, test_mask, _ = make_splits(sub)
-    X = sub[feat_cols].astype("float32")
-    y = sub[target].astype("float32")
-    Xtr, ytr = X[train_mask], y[train_mask]
-    Xval, yval = X[test_mask], y[test_mask]
-    if len(Xtr) == 0 or len(Xval) == 0:
+    import gc
+
+    label = df[target].to_numpy("float32")
+    keep = ~np.isnan(label)
+    train_mask, test_mask, _ = make_splits(df)
+    tr = train_mask & keep
+    va = test_mask & keep
+    if tr.sum() == 0 or va.sum() == 0:
         raise ValueError(
-            f"empty split for {target}: train={len(Xtr)} val={len(Xval)} "
+            f"empty split for {target}: train={int(tr.sum())} val={int(va.sum())} "
             f"(dataset span may be too short for the holdout config)"
         )
+
+    # Build the train/val Datasets ONCE and reuse across quantiles — only the objective
+    # (alpha) changes per quantile, and binning the features 7x was needless memory + time.
+    Xtr = df.loc[tr, feat_cols].to_numpy("float32")
+    Xval = df.loc[va, feat_cols].to_numpy("float32")
+    dtr = lgb.Dataset(Xtr, label=label[tr], free_raw_data=True)
+    dval = lgb.Dataset(Xval, label=label[va], reference=dtr, free_raw_data=True)
+    dtr.construct()
+    dval.construct()
+    del Xtr, Xval
+    gc.collect()
 
     boosters: dict[float, object] = {}
     for q in quantiles:
@@ -82,13 +94,12 @@ def train_quantile_models(
         p.update(objective="quantile", alpha=q, metric="quantile")
         es = p.pop("early_stopping_rounds", 100)
         n_est = p.pop("n_estimators", 1500)
-        dtr = lgb.Dataset(Xtr, label=ytr)
-        dval = lgb.Dataset(Xval, label=yval, reference=dtr)
-        booster = lgb.train(
+        boosters[q] = lgb.train(
             p, dtr, num_boost_round=n_est, valid_sets=[dval],
             callbacks=[lgb.early_stopping(es, verbose=False), lgb.log_evaluation(0)],
         )
-        boosters[q] = booster
+    del dtr, dval
+    gc.collect()
     return boosters
 
 
@@ -140,7 +151,9 @@ def main(args: argparse.Namespace) -> int:
     params = dict(cfg["model"]["lgbm"])
 
     table_path = Path(args.table) if args.table else data_dir() / "training_table"
-    df = _load_table(table_path, max_rows=getattr(args, "max_rows", 40_000_000))
+    # 380M joined rows won't fit; ~8M is ample for LightGBM and leaves headroom for the
+    # per-quantile Datasets on a 16 GB runner.
+    df = _load_table(table_path, max_rows=getattr(args, "max_rows", 8_000_000))
     if df is None:
         print(f"ERROR: training table not found at {table_path} (build it first)")
         return 1
