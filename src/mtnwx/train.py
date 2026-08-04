@@ -92,16 +92,58 @@ def train_quantile_models(
     return boosters
 
 
+def _load_table(path: Path, *, max_rows: int = 40_000_000) -> pd.DataFrame | None:
+    """Load the training table from a single parquet OR a directory of part files.
+
+    The full 7-year joined table is far larger than RAM, so we cap total rows: read
+    parts one at a time and, once the running total would exceed ``max_rows``,
+    proportionally subsample each further part. LightGBM converges fine on tens of
+    millions of rows — no need to hold hundreds of millions."""
+    if path.is_dir():
+        parts = sorted(path.glob("part-*.parquet"))
+    elif path.suffix == ".parquet" and path.exists():
+        parts = [path]
+    else:
+        # Tolerate a directory passed without existing suffix, or a legacy file.
+        alt = path.with_suffix("")
+        if alt.is_dir():
+            parts = sorted(alt.glob("part-*.parquet"))
+        elif Path(str(path) + ".parquet").exists():
+            parts = [Path(str(path) + ".parquet")]
+        else:
+            return None
+    if not parts:
+        return None
+
+    # Row count per part (cheap metadata read) to set a global sampling fraction.
+    import pyarrow.parquet as pq
+
+    counts = [pq.ParquetFile(p).metadata.num_rows for p in parts]
+    total = sum(counts)
+    frac = min(1.0, max_rows / total) if total else 1.0
+    if frac < 1.0:
+        print(f"Table has {total} rows; subsampling to ~{max_rows} (frac={frac:.3f})")
+
+    frames = []
+    rng = np.random.default_rng(17)
+    for p, c in zip(parts, counts):
+        d = pd.read_parquet(p)
+        if frac < 1.0 and len(d):
+            d = d.iloc[rng.random(len(d)) < frac]
+        frames.append(d)
+    return pd.concat(frames, ignore_index=True)
+
+
 def main(args: argparse.Namespace) -> int:
     cfg = load_configs()
     quantiles = cfg["variables"]["quantiles"]
     params = dict(cfg["model"]["lgbm"])
 
-    table_path = Path(args.table) if args.table else data_dir() / "training_table.parquet"
-    if not table_path.exists():
+    table_path = Path(args.table) if args.table else data_dir() / "training_table"
+    df = _load_table(table_path, max_rows=getattr(args, "max_rows", 40_000_000))
+    if df is None:
         print(f"ERROR: training table not found at {table_path} (build it first)")
         return 1
-    df = pd.read_parquet(table_path)
     feat_cols = feature_columns(df)
     print(f"Training on {len(df)} rows, {len(feat_cols)} features")
     print("Features:", feat_cols)

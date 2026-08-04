@@ -96,12 +96,20 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001 — caching is best-effort
                 print(f"  WARN: could not cache obs ({e})")
 
-    # 2. Stream shards one at a time: join each to obs (inner join keeps only rows with
-    # a matching observation), accumulate the much-smaller joined result. This keeps
-    # peak memory to one shard + obs, not all 84 shards.
-    out = Path(args.out) if args.out else dd / "training_table.parquet"
-    parts: list[pd.DataFrame] = []
+    # 2. Stream shards one at a time, writing each joined shard to its OWN parquet file
+    # in a directory. Never hold more than one joined shard in memory — concatenating
+    # all 84 joined shards blows a 16 GB runner (OOM / exit 143). Training reads the
+    # directory lazily. `out` is a directory of part-*.parquet files.
+    out = Path(args.out) if args.out else dd / "training_table"
+    if out.suffix == ".parquet":  # tolerate a .parquet arg -> use as a dir name
+        out = out.with_suffix("")
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("part-*.parquet"):
+        old.unlink()
+
     total = 0
+    written = 0
+    ncols = 0
     for i, s in enumerate(shards, 1):
         hrrr = pd.read_parquet(s)
         hrrr["valid_time"] = pd.to_datetime(hrrr["init_time"]) + pd.to_timedelta(
@@ -109,18 +117,21 @@ def main() -> int:
         )
         joined = build_training_table(hrrr, obs, stations)
         if not joined.empty:
-            parts.append(joined)
+            # Downcast floats to save disk + training memory.
+            for c in joined.select_dtypes("float64").columns:
+                joined[c] = joined[c].astype("float32")
+            joined.to_parquet(out / f"part-{i:03d}.parquet", index=False)
             total += len(joined)
+            written += 1
+            ncols = len(feature_columns(joined))
         del hrrr, joined
         if i % 12 == 0 or i == len(shards):
-            print(f"  joined {i}/{len(shards)} shards, {total} training rows so far")
+            print(f"  joined {i}/{len(shards)} shards, {total} training rows across {written} parts")
 
-    if not parts:
+    if written == 0:
         print("ERROR: no rows survived the obs join")
         return 1
-    table = pd.concat(parts, ignore_index=True)
-    table.to_parquet(out, index=False)
-    print(f"Wrote {len(table)} training rows ({len(feature_columns(table))} features) -> {out}")
+    print(f"Wrote {total} training rows ({ncols} features) across {written} parts -> {out}/")
     return 0
 
 

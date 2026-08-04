@@ -41,9 +41,14 @@ def main(args: argparse.Namespace) -> int:
     # Default NBM sample cap when the attribute isn't provided (programmatic calls).
     if not hasattr(args, "nbm_stations"):
         args.nbm_stations = 60
-    table_path = Path(args.table) if args.table else data_dir() / "training_table.parquet"
+    from mtnwx.train import _load_table
+
+    table_path = Path(args.table) if args.table else data_dir() / "training_table"
     models_dir = Path(args.models) if args.models else data_dir() / "models"
-    df = pd.read_parquet(table_path)
+    df = _load_table(table_path, max_rows=getattr(args, "max_rows", 40_000_000))
+    if df is None:
+        print(f"ERROR: training table not found at {table_path}")
+        return 1
     models, meta = _load_models(models_dir)
     feats = meta["features"]
 
