@@ -20,7 +20,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mtnwx.config import data_dir  # noqa: E402
+from mtnwx.config import data_dir, load_configs  # noqa: E402
 from mtnwx.data.collect_obs import collect  # noqa: E402
 from mtnwx.features.build import build_training_table, feature_columns  # noqa: E402
 
@@ -30,6 +30,7 @@ def main() -> int:
     ap.add_argument("--months", default=None, help="Comma-separated YYYY-MM subset")
     ap.add_argument("--local-shards", default=None, help="Dir of hrrr_*.parquet (skip HF)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-obs-cache", action="store_true", help="Don't read/write the HF obs cache")
     args = ap.parse_args()
 
     dd = data_dir()
@@ -60,13 +61,40 @@ def main() -> int:
     start = pd.Timestamp(months[0] + "-01").date()
     end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
 
-    # 1. Collect observations ONCE for the whole window (hourly; the join key).
-    print(f"Collecting obs {start} .. {end} for {len(stations)} stations...")
-    obs = collect(stations, start, end)
-    print(f"  {len(obs)} QC'd obs rows")
-    if obs.empty:
-        print("ERROR: no observations collected")
-        return 1
+    # 1. Observations for the whole window (hourly; the join key). Collecting 788
+    # stations x 7 years is slow, so cache the result on the HF verify dataset keyed
+    # by the window — re-runs (and recovery after a teardown) reuse it instead of
+    # re-fetching. Disable with --no-obs-cache.
+    obs_key = f"obs/obs_{start}_{end}.parquet"
+    obs = None
+    if not args.no_obs_cache and not args.local_shards:
+        try:
+            from huggingface_hub import hf_hub_download
+
+            repo = load_configs()["hub"]["datasets"]["verify"]
+            p = hf_hub_download(repo, obs_key, repo_type="dataset")
+            obs = pd.read_parquet(p)
+            print(f"  loaded cached obs from HF ({len(obs)} rows): {obs_key}")
+        except Exception:  # noqa: BLE001 — cache miss is normal
+            obs = None
+
+    if obs is None:
+        print(f"Collecting obs {start} .. {end} for {len(stations)} stations...")
+        obs = collect(stations, start, end)
+        print(f"  {len(obs)} QC'd obs rows")
+        if obs.empty:
+            print("ERROR: no observations collected")
+            return 1
+        if not args.no_obs_cache and not args.local_shards:
+            try:
+                from mtnwx.data.hub_io import upload_file
+
+                obs.to_parquet(dd / "obs_cache.parquet", index=False)
+                upload_file(dd / "obs_cache.parquet", obs_key,
+                            load_configs()["hub"]["datasets"]["verify"], repo_type="dataset")
+                print(f"  cached obs to HF: {obs_key}")
+            except Exception as e:  # noqa: BLE001 — caching is best-effort
+                print(f"  WARN: could not cache obs ({e})")
 
     # 2. Stream shards one at a time: join each to obs (inner join keeps only rows with
     # a matching observation), accumulate the much-smaller joined result. This keeps
