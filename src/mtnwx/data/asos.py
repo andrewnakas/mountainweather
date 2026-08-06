@@ -80,46 +80,33 @@ def fetch_asos_hourly(station_ids: list[str], start: date, end: date) -> pd.Data
     urls = _year_urls(start, end)
     url_list = "[" + ",".join(f"'{u}'" for u in urls) + "]"
     con = _con()
+    # Do the hourly aggregation IN DuckDB: floor `valid` (tz-aware station-local) to the
+    # UTC hour and group there. This returns ~1.5M already-hourly rows instead of ~20M
+    # raw METARs, avoiding a giant pandas materialization + a slow 20M-row tz conversion
+    # (that pandas path stalled the obs job ~20 min until GitHub killed it).
+    kt = KT_TO_MS
     q = f"""
-        SELECT station,
-               valid,
-               tmpc, dwpc, relh, sknt, gust, drct, p01m
+        SELECT 'ASOS:' || station AS station_id,
+               time_bucket(INTERVAL '1 hour', valid AT TIME ZONE 'UTC') AS valid_time,
+               avg(tmpc)        AS air_temp_c,
+               avg(dwpc)        AS dewpoint_c,
+               avg(relh)        AS relative_humidity_pct,
+               avg(sknt) * {kt} AS wind_speed_ms,
+               max(gust) * {kt} AS wind_gust_ms,
+               avg(drct)        AS wind_dir_deg,
+               max(p01m)        AS precip_1h_mm
         FROM read_parquet({url_list}, hive_partitioning=true, union_by_name=true)
         WHERE station IN ({in_list})
           AND valid >= TIMESTAMP '{start.isoformat()} 00:00:00'
           AND valid <  TIMESTAMP '{end.isoformat()} 23:59:59'
+        GROUP BY 1, 2
     """
-    raw = con.execute(q).fetchdf()
-    if raw.empty:
+    out = con.execute(q).fetchdf()
+    if out.empty:
         return pd.DataFrame(columns=OBS_COLUMNS)
-
-    out = pd.DataFrame()
-    # `valid` is tz-aware (station local); convert to UTC naive to match our schema.
-    vt = pd.to_datetime(raw["valid"], utc=True).dt.tz_localize(None)
-    out["valid_time"] = vt
-    out["station_id"] = "ASOS:" + raw["station"].astype(str)
-    out["air_temp_c"] = pd.to_numeric(raw["tmpc"], errors="coerce")
-    out["dewpoint_c"] = pd.to_numeric(raw["dwpc"], errors="coerce")
-    out["relative_humidity_pct"] = pd.to_numeric(raw["relh"], errors="coerce")
-    out["wind_speed_ms"] = pd.to_numeric(raw["sknt"], errors="coerce") * KT_TO_MS
-    out["wind_gust_ms"] = pd.to_numeric(raw["gust"], errors="coerce") * KT_TO_MS
-    out["wind_dir_deg"] = pd.to_numeric(raw["drct"], errors="coerce")
-    out["precip_1h_mm"] = pd.to_numeric(raw["p01m"], errors="coerce")
+    out["valid_time"] = pd.to_datetime(out["valid_time"]).dt.tz_localize(None)
     out["source"] = "ASOS"
-
-    # Aggregate sub-hourly METARs to the top of each hour. Floor-then-groupby (NOT
-    # groupby.resample): resample fills every empty hour across each station's full
-    # multi-year span, exploding to billions of rows and hanging. Grouping on the
-    # floored hour only emits hours that actually have data — vectorized and fast.
-    out["valid_time"] = out["valid_time"].dt.floor("h")
-    agg = {
-        "air_temp_c": "mean", "dewpoint_c": "mean", "relative_humidity_pct": "mean",
-        "wind_speed_ms": "mean", "wind_gust_ms": "max", "wind_dir_deg": "mean",
-        "precip_1h_mm": "max",
-    }
-    out = out.groupby(["station_id", "valid_time"], as_index=False).agg(agg)
     for c in OBS_COLUMNS:
         if c not in out:
             out[c] = np.nan
-    out["source"] = "ASOS"
     return out[OBS_COLUMNS]
