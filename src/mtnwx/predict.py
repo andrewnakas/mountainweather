@@ -115,6 +115,13 @@ def to_station_json(forecast: pd.DataFrame, stations: pd.DataFrame, models: dict
                 entry["q90"] = [_r(v) for v in g[f"{target}_q90"]]
             entry["units"] = TARGET_UNITS.get(target, "")
             series[target] = entry
+        # Wind direction (deg from N, HRRR-derived) — not a corrected target but needed
+        # to draw the wind field over the land. Carried through from build_forecast_features.
+        if "wind_dir_10m" in g.columns:
+            series["wind_dir_deg"] = {
+                "point": [_r(v) for v in g["wind_dir_10m"]],
+                "units": "deg",
+            }
         features.append(
             {
                 "type": "Feature",

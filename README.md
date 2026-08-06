@@ -1,5 +1,19 @@
 # mountainweather (`mtnwx`)
 
+### 🌬️ [**→ Live mountain wind viewer**](https://andrewnakas.github.io/mountainweather/)
+
+An interactive, hourly-updated wind field over the western-US mountains — the model's
+corrected wind, gusts, temperature, humidity and precip rendered **over the terrain**, with a
+48-hour time scrubber. Wind front and centre.
+
+[![Live wind viewer](docs/wind-viewer.jpg)](https://andrewnakas.github.io/mountainweather/)
+
+**How good is it?** On held-out mountain stations across 7 years, `mtnwx` beats NOAA's
+National Blend of Models by **+56% on temperature** and **+30% on wind gusts** (MAE), and
+beats raw HRRR on every variable. Full scorecard below.
+
+---
+
 A high-resolution, short-range weather model built to be **the best available for mountain
 climates in North America** — and to prove it against the operational benchmarks.
 
