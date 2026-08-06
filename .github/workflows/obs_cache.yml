@@ -29,23 +29,30 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -u - <<'PY'
-          import glob, hashlib, os
+          import hashlib, os
           import pandas as pd
-          from huggingface_hub import snapshot_download
+          from huggingface_hub import HfApi, hf_hub_download
           from mtnwx.data.collect_obs import collect
           from mtnwx.data.hub_io import upload_file
           from mtnwx.config import load_configs
 
           hub = load_configs()["hub"]
-          st_dir = snapshot_download(hub["datasets"]["stations"], repo_type="dataset")
-          stf = glob.glob(f"{st_dir}/*terrain*.parquet") or glob.glob(f"{st_dir}/*.parquet")
-          stations = pd.read_parquet(stf[0])
+          token = os.environ.get("HF_TOKEN")
+          api = HfApi(token=token)
 
-          # Same window + key derivation as build_training_table.py (all shards, 2019-01..2025-12).
-          shards = snapshot_download(hub["datasets"]["training"], repo_type="dataset")
+          # Stations: fetch just the one terrain parquet, not a full snapshot.
+          st_files = api.list_repo_files(hub["datasets"]["stations"], repo_type="dataset")
+          st_name = next((f for f in st_files if "terrain" in f and f.endswith(".parquet")),
+                         next(f for f in st_files if f.endswith(".parquet")))
+          stations = pd.read_parquet(
+              hf_hub_download(hub["datasets"]["stations"], st_name, repo_type="dataset", token=token))
+
+          # Window from shard FILENAMES only — list metadata, do NOT download the ~9 GB of
+          # shard contents (that snapshot_download was failing on HF's CDN).
+          files = api.list_repo_files(hub["datasets"]["training"], repo_type="dataset")
           months = sorted(
               os.path.basename(f).replace("hrrr_", "").replace(".parquet", "")
-              for f in glob.glob(f"{shards}/**/hrrr_*.parquet", recursive=True)
+              for f in files if "hrrr_" in f and f.endswith(".parquet")
           )
           start = pd.Timestamp(months[0] + "-01").date()
           end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
