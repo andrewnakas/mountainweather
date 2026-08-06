@@ -88,3 +88,8 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # Pages' deployment backend gets congested under load and the default wait
+          # times out at "deployment_queued". Give it longer before aborting.
+          timeout: 600000
+          error_count: 15
