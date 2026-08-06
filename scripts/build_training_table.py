@@ -142,6 +142,9 @@ def main() -> int:
         if not joined.empty:
             if nbm is not None:
                 joined = joined.merge(nbm, on=["station_id", "valid_time"], how="left")
+                # Explicit availability flag: NBM only covers ~300/978 stations, so give
+                # the trees a clean 0/1 split instead of inferring from NaN columns.
+                joined["nbm_available"] = joined["nbm_air_temp_c"].notna().astype("float32")
             # Downcast floats to save disk + training memory.
             for c in joined.select_dtypes("float64").columns:
                 joined[c] = joined[c].astype("float32")

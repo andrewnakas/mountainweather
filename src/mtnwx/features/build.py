@@ -106,6 +106,30 @@ def add_terrain_features(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFra
         grid_elev = out.get("dem_elevation_m")
     if grid_elev is not None and "elevation_m" in out.columns:
         out["elevation_delta_m"] = (out["elevation_m"] - grid_elev).astype("float32")
+
+    # Engineered interactions targeting the harder variables:
+    #  - wind x terrain: ridge-top acceleration / valley sheltering scale with exposure,
+    #    so give the trees explicit wind*slope and wind*TPI terms (helps wind_speed).
+    if "wind_speed_10m" in out.columns:
+        if "slope_deg" in out.columns:
+            out["wind_x_slope"] = (out["wind_speed_10m"] * out["slope_deg"]).astype("float32")
+        if "tpi_2km" in out.columns:
+            out["wind_x_tpi2km"] = (out["wind_speed_10m"] * out["tpi_2km"]).astype("float32")
+        # 80m-to-10m wind ratio: how decoupled the surface is from the flow aloft.
+        if "wind_speed_80m" in out.columns:
+            out["wind_shear_ratio"] = (
+                out["wind_speed_80m"] / (out["wind_speed_10m"] + 0.1)
+            ).astype("float32")
+    #  - lapse-corrected HRRR temp as an explicit feature (the physical baseline).
+    if {"temperature_2m", "elevation_delta_m"}.issubset(out.columns):
+        out["temp_lapse_corr"] = (
+            out["temperature_2m"] - 0.0065 * out["elevation_delta_m"]
+        ).astype("float32")
+    #  - dryness (temp - dewpoint spread): a cleaner RH signal than RH alone.
+    if {"temperature_2m", "dew_point_temperature_2m"}.issubset(out.columns):
+        out["dewpoint_depression"] = (
+            out["temperature_2m"] - out["dew_point_temperature_2m"]
+        ).astype("float32")
     return out
 
 
