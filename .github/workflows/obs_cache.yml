@@ -29,7 +29,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -u - <<'PY'
-          import hashlib, os
+          import hashlib, os, time
           import pandas as pd
           from huggingface_hub import HfApi, hf_hub_download
           from mtnwx.data.collect_obs import collect
@@ -40,16 +40,27 @@ jobs:
           token = os.environ.get("HF_TOKEN")
           api = HfApi(token=token)
 
+          def retry(fn, *a, tries=6, **k):
+              # HF's CloudFront intermittently 5xx's on metadata/list calls; retry with backoff.
+              for i in range(tries):
+                  try:
+                      return fn(*a, **k)
+                  except Exception as e:
+                      if i == tries - 1:
+                          raise
+                      print(f"  retry {i+1}/{tries} after {type(e).__name__}", flush=True)
+                      time.sleep(2 ** i + 2)
+
           # Stations: fetch just the one terrain parquet, not a full snapshot.
-          st_files = api.list_repo_files(hub["datasets"]["stations"], repo_type="dataset")
+          st_files = retry(api.list_repo_files, hub["datasets"]["stations"], repo_type="dataset")
           st_name = next((f for f in st_files if "terrain" in f and f.endswith(".parquet")),
                          next(f for f in st_files if f.endswith(".parquet")))
           stations = pd.read_parquet(
-              hf_hub_download(hub["datasets"]["stations"], st_name, repo_type="dataset", token=token))
+              retry(hf_hub_download, hub["datasets"]["stations"], st_name, repo_type="dataset", token=token))
 
           # Window from shard FILENAMES only — list metadata, do NOT download the ~9 GB of
           # shard contents (that snapshot_download was failing on HF's CDN).
-          files = api.list_repo_files(hub["datasets"]["training"], repo_type="dataset")
+          files = retry(api.list_repo_files, hub["datasets"]["training"], repo_type="dataset")
           months = sorted(
               os.path.basename(f).replace("hrrr_", "").replace(".parquet", "")
               for f in files if "hrrr_" in f and f.endswith(".parquet")
@@ -64,6 +75,6 @@ jobs:
           print(f"  {len(obs)} obs rows")
           os.makedirs("data", exist_ok=True)
           obs.to_parquet("data/obs_cache.parquet", index=False)
-          upload_file("data/obs_cache.parquet", obs_key, hub["datasets"]["verify"], repo_type="dataset")
+          retry(upload_file, "data/obs_cache.parquet", obs_key, hub["datasets"]["verify"], repo_type="dataset")
           print("cached ->", obs_key)
           PY
