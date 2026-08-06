@@ -63,21 +63,33 @@ def collect(
     is_asos = stations["station_id"].astype(str).str.startswith("ASOS:")
     asos_ids = stations.loc[is_asos, "station_id"].astype(str).tolist()
     if asos_ids:
-        try:
-            from mtnwx.data.asos import fetch_asos_hourly
+        # Fetch ASOS year-by-year: one 7-year DuckDB scan is opaque and slow to start;
+        # per-year scans make progress visible and bound memory. Flush so the CI log
+        # shows where we are (a silent multi-minute stall previously read as a hang).
+        from datetime import date as _date
 
-            adf = fetch_asos_hourly(asos_ids, start, end)
-            if not adf.empty:
-                frames.append(obs.normalize_hourly(adf))
-            print(f"  ASOS: {len(adf)} obs rows from {len(asos_ids)} stations")
-        except Exception as exc:  # noqa: BLE001 — ASOS is additive
-            print(f"  WARN: ASOS obs fetch failed ({exc})")
+        from mtnwx.data.asos import fetch_asos_hourly
+
+        print(f"  ASOS: fetching {len(asos_ids)} stations, {start.year}-{end.year}...", flush=True)
+        got = 0
+        for yr in range(start.year, end.year + 1):
+            ys = max(start, _date(yr, 1, 1))
+            ye = min(end, _date(yr, 12, 31))
+            try:
+                adf = fetch_asos_hourly(asos_ids, ys, ye)
+                if not adf.empty:
+                    frames.append(obs.normalize_hourly(adf))
+                    got += len(adf)
+                print(f"    ASOS {yr}: {len(adf)} rows (total {got})", flush=True)
+            except Exception as exc:  # noqa: BLE001 — ASOS is additive
+                print(f"    WARN: ASOS {yr} failed ({exc})", flush=True)
 
     other = stations.loc[~is_asos]
     rows = [row for _, row in other.iterrows()]
     n = len(rows)
     done = 0
     if n:
+        print(f"  SNOTEL/other: fetching {n} stations ({workers} workers)...", flush=True)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for df in ex.map(lambda r: _fetch_one(r, start, end, token), rows):
                 done += 1
@@ -85,7 +97,7 @@ def collect(
                     frames.append(obs.normalize_hourly(df))
                 if done % 100 == 0 or done == n:
                     got = sum(len(f) for f in frames)
-                    print(f"  [{done}/{n}] stations processed, {got} obs rows so far")
+                    print(f"  [{done}/{n}] stations processed, {got} obs rows so far", flush=True)
     if not frames:
         return obs._empty()
     allobs = pd.concat(frames, ignore_index=True)

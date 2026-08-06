@@ -28,7 +28,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python - <<'PY'
+          python -u - <<'PY'
           import glob, hashlib, os
           import pandas as pd
           from huggingface_hub import snapshot_download
