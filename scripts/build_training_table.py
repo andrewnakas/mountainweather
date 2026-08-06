@@ -31,6 +31,7 @@ def main() -> int:
     ap.add_argument("--local-shards", default=None, help="Dir of hrrr_*.parquet (skip HF)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-obs-cache", action="store_true", help="Don't read/write the HF obs cache")
+    ap.add_argument("--no-nbm-features", action="store_true", help="Don't merge NBM predictor columns")
     args = ap.parse_args()
 
     dd = data_dir()
@@ -101,6 +102,23 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001 — caching is best-effort
                 print(f"  WARN: could not cache obs ({e})")
 
+    # 1b. NBM predictors (optional): if a matching NBM cache exists on HF, load it and
+    # merge nbm_* columns into each joined shard as PREDICTORS — this lets the model
+    # improve on NBM's blend instead of losing to it on wind/RH.
+    nbm = None
+    if not args.no_nbm_features and not args.local_shards:
+        try:
+            from huggingface_hub import hf_hub_download
+
+            nbm_key = f"nbm/nbm_{start}_{end}_n{len(stations)}_{sid_hash}.parquet"
+            p = hf_hub_download(load_configs()["hub"]["datasets"]["verify"], nbm_key, repo_type="dataset")
+            nbm = pd.read_parquet(p)
+            nbm["valid_time"] = pd.to_datetime(nbm["valid_time"])
+            print(f"  loaded NBM predictors ({len(nbm)} rows): {nbm_key}")
+        except Exception as e:  # noqa: BLE001 — NBM features are optional
+            print(f"  NBM predictor cache not found ({type(e).__name__}); training without NBM features")
+            nbm = None
+
     # 2. Stream shards one at a time, writing each joined shard to its OWN parquet file
     # in a directory. Never hold more than one joined shard in memory — concatenating
     # all 84 joined shards blows a 16 GB runner (OOM / exit 143). Training reads the
@@ -122,6 +140,8 @@ def main() -> int:
         )
         joined = build_training_table(hrrr, obs, stations)
         if not joined.empty:
+            if nbm is not None:
+                joined = joined.merge(nbm, on=["station_id", "valid_time"], how="left")
             # Downcast floats to save disk + training memory.
             for c in joined.select_dtypes("float64").columns:
                 joined[c] = joined[c].astype("float32")

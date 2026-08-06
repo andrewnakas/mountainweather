@@ -59,8 +59,14 @@ def main(args: argparse.Namespace) -> int:
     test = df.loc[test_mask].reset_index(drop=True)
     print(f"Verifying on {len(test)} held-out rows")
 
-    # Optionally attach NBM benchmark for the held-out window/stations.
-    if not args.no_nbm:
+    # If NBM columns are already in the table (merged as predictors at build time), use
+    # them directly — no re-fetch needed, and it's the full held-out set, not a sample.
+    have_nbm_cols = any(c.startswith("nbm_") for c in test.columns)
+    if have_nbm_cols:
+        print("Using in-table NBM columns for the benchmark (no re-fetch).")
+
+    # Otherwise attach NBM benchmark for a sample of held-out stations.
+    if not args.no_nbm and not have_nbm_cols:
         from mtnwx.data.nbm import fetch_nbm_for_stations
 
         vt = pd.to_datetime(test["valid_time"])

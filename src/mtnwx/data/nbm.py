@@ -86,22 +86,43 @@ def fetch_nbm_hourly(lat: float, lon: float, start: date, end: date) -> pd.DataF
     return out
 
 
-def fetch_nbm_for_stations(stations: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
-    """NBM hourly forecasts for every station over the verification window."""
-    frames = []
-    n = len(stations)
-    for i, (_, s) in enumerate(stations.iterrows(), 1):
+def fetch_nbm_for_stations(
+    stations: pd.DataFrame, start: date, end: date, *, workers: int = 6
+) -> pd.DataFrame:
+    """NBM hourly forecasts for every station over [start, end].
+
+    Parallelized (Open-Meteo tolerates a modest thread pool) so the full-catalogue
+    NBM-predictor cache builds in reasonable time. Per-station failures are skipped."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    recs = list(stations.iterrows())
+    n = len(recs)
+
+    def one(rec):
+        _, s = rec
         try:
             df = fetch_nbm_hourly(float(s["lat"]), float(s["lon"]), start, end)
         except Exception as exc:  # noqa: BLE001
-            print(f"WARN: NBM fetch failed for {s['station_id']}: {exc}")
-            continue
-        if not df.empty:
-            df["station_id"] = s["station_id"]
-            frames.append(df)
-        if i % 25 == 0 or i == n:
-            print(f"  NBM: {i}/{n} stations")
-        time.sleep(0.2)  # be gentle with the free API
+            print(f"  WARN: NBM fetch failed for {s['station_id']}: {exc}", flush=True)
+            return None
+        if df.empty:
+            return None
+        df["station_id"] = s["station_id"]
+        return df
+
+    frames = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for df in ex.map(one, recs):
+            done += 1
+            if df is not None:
+                frames.append(df)
+            if done % 100 == 0 or done == n:
+                got = sum(len(f) for f in frames)
+                print(f"  NBM: {done}/{n} stations, {got} rows", flush=True)
     if not frames:
         return pd.DataFrame(columns=["station_id", "valid_time", *_RENAME.values()])
-    return pd.concat(frames, ignore_index=True)
+    out = pd.concat(frames, ignore_index=True)
+    for c in out.select_dtypes("float64").columns:
+        out[c] = out[c].astype("float32")
+    return out
