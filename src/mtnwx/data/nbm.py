@@ -86,40 +86,80 @@ def fetch_nbm_hourly(lat: float, lon: float, start: date, end: date) -> pd.DataF
     return out
 
 
+def _one_location_frame(hourly: dict) -> pd.DataFrame:
+    if not hourly or "time" not in hourly:
+        return pd.DataFrame(columns=["valid_time", *_RENAME.values()])
+    out = pd.DataFrame({"valid_time": pd.to_datetime(hourly["time"])})
+    for src, dst in _RENAME.items():
+        vals = hourly.get(src)
+        out[dst] = pd.Series(vals, dtype="float64") if vals is not None else np.nan
+    return out
+
+
+def fetch_nbm_batch(
+    coords: list[tuple[str, float, float]], start: date, end: date
+) -> pd.DataFrame:
+    """Fetch NBM for many stations in ONE Open-Meteo call (multi-location request).
+
+    ``coords`` is a list of (station_id, lat, lon). Open-Meteo accepts comma-separated
+    lat/lon and returns a list of per-location results in the same order — collapsing
+    ~1000 rate-limited per-station calls into ~10 batched ones."""
+    if not coords:
+        return pd.DataFrame(columns=["station_id", "valid_time", *_RENAME.values()])
+    lats = ",".join(f"{la:.4f}" for _, la, _ in coords)
+    lons = ",".join(f"{lo:.4f}" for _, _, lo in coords)
+    params = {
+        "latitude": lats,
+        "longitude": lons,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": ",".join(HOURLY_VARS),
+        "models": "ncep_nbm_conus",
+        "wind_speed_unit": "ms",
+        "timezone": "GMT",
+    }
+    payload = _http_json(f"{ARCHIVE_URL}?" + urlencode(params))
+    # Multi-location -> a list; single-location -> a dict.
+    results = payload if isinstance(payload, list) else [payload]
+    frames = []
+    for (sid, _, _), res in zip(coords, results):
+        f = _one_location_frame(res.get("hourly", {}) if isinstance(res, dict) else {})
+        if not f.empty:
+            f["station_id"] = sid
+            frames.append(f)
+    if not frames:
+        return pd.DataFrame(columns=["station_id", "valid_time", *_RENAME.values()])
+    return pd.concat(frames, ignore_index=True)
+
+
 def fetch_nbm_for_stations(
-    stations: pd.DataFrame, start: date, end: date, *, workers: int = 6
+    stations: pd.DataFrame, start: date, end: date, *, batch: int = 100
 ) -> pd.DataFrame:
     """NBM hourly forecasts for every station over [start, end].
 
-    Parallelized (Open-Meteo tolerates a modest thread pool) so the full-catalogue
-    NBM-predictor cache builds in reasonable time. Per-station failures are skipped."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    recs = list(stations.iterrows())
-    n = len(recs)
-
-    def one(rec):
-        _, s = rec
-        try:
-            df = fetch_nbm_hourly(float(s["lat"]), float(s["lon"]), start, end)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  WARN: NBM fetch failed for {s['station_id']}: {exc}", flush=True)
-            return None
-        if df.empty:
-            return None
-        df["station_id"] = s["station_id"]
-        return df
-
+    Uses Open-Meteo multi-location batching (~100 stations/call) and yearly chunks to
+    keep response sizes sane — collapsing ~1000 rate-limited per-station calls into a
+    couple dozen. Per-batch failures are skipped."""
+    coords = [
+        (str(s["station_id"]), float(s["lat"]), float(s["lon"]))
+        for _, s in stations.iterrows()
+    ]
+    n = len(coords)
+    years = list(range(start.year, end.year + 1))
     frames = []
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for df in ex.map(one, recs):
-            done += 1
-            if df is not None:
-                frames.append(df)
-            if done % 100 == 0 or done == n:
-                got = sum(len(f) for f in frames)
-                print(f"  NBM: {done}/{n} stations, {got} rows", flush=True)
+    for b0 in range(0, n, batch):
+        chunk = coords[b0 : b0 + batch]
+        for yr in years:
+            ys = max(start, date(yr, 1, 1))
+            ye = min(end, date(yr, 12, 31))
+            try:
+                f = fetch_nbm_batch(chunk, ys, ye)
+                if not f.empty:
+                    frames.append(f)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  WARN: NBM batch [{b0}:{b0+len(chunk)}] {yr} failed ({exc})", flush=True)
+        got = sum(len(f) for f in frames)
+        print(f"  NBM: {min(b0 + batch, n)}/{n} stations, {got} rows", flush=True)
     if not frames:
         return pd.DataFrame(columns=["station_id", "valid_time", *_RENAME.values()])
     out = pd.concat(frames, ignore_index=True)
