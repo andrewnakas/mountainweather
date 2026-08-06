@@ -275,20 +275,27 @@ def qc(df: pd.DataFrame, *, persistence_hours: int = 24, copy: bool = True) -> p
         bad = out["dewpoint_c"] > out["air_temp_c"] + 1.0
         out.loc[bad, "dewpoint_c"] = np.nan
 
-    # Per-station step and flatline screens. Operate on positional slices so the
-    # grouping column (station_id) is never consumed by groupby-apply.
-    for _, idx in out.groupby("station_id").groups.items():
-        g = out.loc[idx]
-        for col, step in QC_MAX_STEP.items():
-            if col in g:
-                jump = g[col].diff().abs() > step
-                out.loc[idx[jump.values], col] = np.nan
-        # Flatline: a run of identical values >= persistence_hours -> null the run.
-        for col in ("air_temp_c", "wind_speed_ms", "relative_humidity_pct"):
-            if col in g and g[col].notna().sum() > persistence_hours:
-                same = g[col].eq(g[col].shift())
-                run = same.groupby((~same).cumsum()).cumcount() + 1
-                out.loc[idx[(run >= persistence_hours).values], col] = np.nan
+    # Per-station step and flatline screens — VECTORIZED across the whole (sorted)
+    # frame via groupby transforms, not a per-station Python loop with .loc copies
+    # (that pattern was O(stations x rows) and hung on 56.9M rows / 978 stations).
+    # ``out`` is already sorted by (station_id, valid_time).
+    gb = out.groupby("station_id", sort=False)
+
+    # Step screen: null a value that jumped more than `step` from the previous hour.
+    for col, step in QC_MAX_STEP.items():
+        if col in out:
+            jump = gb[col].diff().abs() > step
+            out.loc[jump.to_numpy(), col] = np.nan
+
+    # Flatline screen: within each station, a run of identical values lasting
+    # >= persistence_hours is nulled. run_len = position within a constant-value run.
+    for col in ("air_temp_c", "wind_speed_ms", "relative_humidity_pct"):
+        if col not in out:
+            continue
+        changed = gb[col].diff().ne(0) | gb[col].diff().isna()  # True where value changes / group start
+        run_id = changed.cumsum()
+        run_len = out.groupby(["station_id", run_id], sort=False).cumcount() + 1
+        out.loc[(run_len >= persistence_hours).to_numpy(), col] = np.nan
 
     meas = [c for c in OBS_COLUMNS if c not in ("station_id", "valid_time", "source")]
     out = out.dropna(subset=meas, how="all").reset_index(drop=True)
