@@ -107,18 +107,17 @@ def fetch_asos_hourly(station_ids: list[str], start: date, end: date) -> pd.Data
     out["precip_1h_mm"] = pd.to_numeric(raw["p01m"], errors="coerce")
     out["source"] = "ASOS"
 
-    out = out.set_index("valid_time")
+    # Aggregate sub-hourly METARs to the top of each hour. Floor-then-groupby (NOT
+    # groupby.resample): resample fills every empty hour across each station's full
+    # multi-year span, exploding to billions of rows and hanging. Grouping on the
+    # floored hour only emits hours that actually have data — vectorized and fast.
+    out["valid_time"] = out["valid_time"].dt.floor("h")
     agg = {
         "air_temp_c": "mean", "dewpoint_c": "mean", "relative_humidity_pct": "mean",
         "wind_speed_ms": "mean", "wind_gust_ms": "max", "wind_dir_deg": "mean",
         "precip_1h_mm": "max",
     }
-    out = (
-        out.groupby("station_id")
-        .resample("1h")
-        .agg(agg)
-        .reset_index()
-    )
+    out = out.groupby(["station_id", "valid_time"], as_index=False).agg(agg)
     for c in OBS_COLUMNS:
         if c not in out:
             out[c] = np.nan
