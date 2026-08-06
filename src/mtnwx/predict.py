@@ -88,7 +88,12 @@ def predict_table(df: pd.DataFrame, models: dict, meta: dict) -> pd.DataFrame:
             df[f] = np.nan
     X = df[feats].astype("float32")
 
-    out = df[["station_id", "init_time", "lead_hour", "valid_time"]].copy()
+    keep = ["station_id", "init_time", "lead_hour", "valid_time"]
+    # Carry wind direction through (an input feature, not a corrected target) so the
+    # viewer can draw the wind field's direction.
+    if "wind_dir_10m" in df.columns:
+        keep.append("wind_dir_10m")
+    out = df[keep].copy()
     for target, boosters in models.items():
         for q, booster in boosters.items():
             out[f"{target}_q{int(q * 100):02d}"] = booster.predict(X).astype("float32")
