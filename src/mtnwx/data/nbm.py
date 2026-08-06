@@ -29,7 +29,9 @@ import pandas as pd
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-HOURLY_VARS = ("temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m")
+HOURLY_VARS = (
+    "temperature_2m", "relative_humidity_2m", "wind_speed_10m", "wind_gusts_10m", "precipitation",
+)
 
 # Open-Meteo var -> our obs/target column name.
 _RENAME = {
@@ -37,6 +39,7 @@ _RENAME = {
     "relative_humidity_2m": "nbm_relative_humidity_pct",
     "wind_speed_10m": "nbm_wind_speed_ms",
     "wind_gusts_10m": "nbm_wind_gust_ms",
+    "precipitation": "nbm_precip_1h_mm",
 }
 
 

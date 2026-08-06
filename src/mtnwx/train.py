@@ -27,7 +27,9 @@ import pandas as pd
 from mtnwx.config import data_dir, load_configs
 from mtnwx.features.build import feature_columns
 
-PHASE1_TARGETS = ["air_temp_c", "wind_speed_ms", "wind_gust_ms", "relative_humidity_pct"]
+PHASE1_TARGETS = [
+    "air_temp_c", "wind_speed_ms", "wind_gust_ms", "relative_humidity_pct", "precip_1h_mm",
+]
 
 
 def make_splits(

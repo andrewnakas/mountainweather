@@ -28,6 +28,7 @@ TARGET_SPEC = {
     "relative_humidity_pct": {"hrrr_field": "relative_humidity_2m"},
     "wind_speed_ms": {"hrrr_field": "wind_speed_10m"},   # derived below
     "wind_gust_ms": {"hrrr_field": "wind_gust_surface"},
+    "precip_1h_mm": {"hrrr_field": "precip_mm_hrrr"},     # rate->mm, derived below
 }
 
 
@@ -41,6 +42,11 @@ def add_derived_predictors(hrrr: pd.DataFrame) -> pd.DataFrame:
         ).astype("float32")
     if {"wind_u_80m", "wind_v_80m"}.issubset(out.columns):
         out["wind_speed_80m"] = np.hypot(out["wind_u_80m"], out["wind_v_80m"]).astype("float32")
+    # HRRR precipitation_surface is a rate (kg m-2 s-1 == mm s-1); convert to mm/hour so
+    # it lines up with the hourly precip_1h_mm observation. This is the raw-HRRR precip
+    # baseline the post-processor must beat.
+    if "precipitation_surface" in out.columns:
+        out["precip_mm_hrrr"] = (out["precipitation_surface"] * 3600.0).clip(lower=0).astype("float32")
     out["valid_time"] = pd.to_datetime(out["init_time"]) + pd.to_timedelta(out["lead_hour"], unit="h")
     return out
 

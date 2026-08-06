@@ -88,6 +88,7 @@ def main(args: argparse.Namespace) -> int:
         "relative_humidity_pct": "nbm_relative_humidity_pct",
         "wind_speed_ms": "nbm_wind_speed_ms",
         "wind_gust_ms": "nbm_wind_gust_ms",
+        "precip_1h_mm": "nbm_precip_1h_mm",
     }
 
     all_metrics = []
