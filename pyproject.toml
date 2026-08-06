@@ -25,8 +25,6 @@ dependencies = [
     "scipy>=1.11",
     "pyyaml>=6.0",
     "duckdb>=1.0",
-    "dynamical-catalog>=0.8",   # GFS access; <0.8 (e.g. 0.3.0) mis-resolves gfs-forecast
-    "icechunk>=0.1",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +32,13 @@ train = [
     "lightgbm>=4.3",
     "scikit-learn>=1.4",
     "huggingface-hub>=0.24",
+]
+# GFS second-model extraction only. dynamical-catalog>=0.8 requires Python>=3.12, so
+# keep it OUT of core deps — otherwise every Python-3.11 workflow (forecast, CI) fails
+# to install. The GFS backfill workflow runs on 3.12 and installs .[train,gfs].
+gfs = [
+    "dynamical-catalog>=0.8",
+    "icechunk>=0.1",
 ]
 terrain = [
     "rasterio>=1.3",
