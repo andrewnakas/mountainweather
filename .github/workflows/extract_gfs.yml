@@ -1,0 +1,114 @@
+name: GFS backfill (2nd model)
+
+# Extract GFS predictors at all stations into gfs/ shards on the training dataset.
+# GFS (NOAA global, dynamical.org icechunk, from 2021-05) is the second model that gives
+# the post-processor model diversity (the thing NBM's blend has and a single-HRRR model
+# lacks) — the real lever for wind-speed/RH. Resumable; skips gfs shards already on HF.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First init-month YYYY-MM (GFS archive starts 2021-05)"
+        default: "2021-05"
+      end:
+        description: "Last init-month YYYY-MM (blank = month before today)"
+        default: ""
+      max_parallel:
+        description: "Max concurrent extraction jobs"
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      months: ${{ steps.gen.outputs.months }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: gen
+        run: |
+          END="${{ github.event.inputs.end }}"
+          if [ -z "$END" ]; then
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}")
+          else
+            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}" --end "$END")
+          fi
+          echo "months=$M" >> "$GITHUB_OUTPUT"
+
+  extract:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        month: ${{ fromJSON(needs.plan.outputs.months) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train]"
+
+      - name: Require HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: '[ -n "$HF_TOKEN" ] || { echo "::error::HF_TOKEN empty"; exit 1; }'
+
+      - name: Fetch station catalogue from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import download_dataset_snapshot
+          import shutil, glob, os
+          d = download_dataset_snapshot("stations")
+          os.makedirs("data", exist_ok=True)
+          for f in glob.glob(os.path.join(d, "*.parquet")):
+              shutil.copy(f, "data/")
+          PY
+
+      - name: Skip if GFS shard already on HF
+        id: check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["datasets"]["training"]
+          token = os.environ.get("HF_TOKEN") or None
+          api = HfApi(token=token)
+          try:
+              files = set(api.list_repo_files(repo, repo_type="dataset"))
+          except Exception:
+              files = set()
+          target = f"gfs/gfs_${{ matrix.month }}.parquet"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"exists={'1' if target in files else '0'}\n")
+          PY
+
+      - name: Extract GFS month
+        if: steps.check.outputs.exists == '0'
+        run: python -m mtnwx.cli extract-gfs --month "${{ matrix.month }}"
+
+      - name: Upload GFS shard to HF
+        if: steps.check.outputs.exists == '0'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import upload_shard
+          m = "${{ matrix.month }}"
+          upload_shard(f"data/gfs_{m}.parquet", f"gfs/gfs_{m}.parquet", which="training")
+          print("uploaded GFS", m)
+          PY

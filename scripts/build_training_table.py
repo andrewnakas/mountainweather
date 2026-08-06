@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-obs-cache", action="store_true", help="Don't read/write the HF obs cache")
     ap.add_argument("--no-nbm-features", action="store_true", help="Don't merge NBM predictor columns")
+    ap.add_argument("--no-gfs-features", action="store_true", help="Don't merge GFS predictor shards")
     args = ap.parse_args()
 
     dd = data_dir()
@@ -119,6 +121,19 @@ def main() -> int:
             print(f"  NBM predictor cache not found ({type(e).__name__}); training without NBM features")
             nbm = None
 
+    # 1c. GFS predictor shards (optional second model, for diversity): index gfs_<YYYY-MM>
+    # shards by month so each HRRR shard can merge the matching GFS month on
+    # (station_id, init_time, lead_hour). GFS only covers 2021-05+, so earlier months
+    # simply have no GFS shard (NaN gfs_* columns, handled by LightGBM).
+    gfs_by_month = {}
+    if not args.no_gfs_features:
+        gfs_shards = glob.glob(str(Path(shard_dir) / "**" / "gfs_*.parquet"), recursive=True)
+        for g in gfs_shards:
+            mm = os.path.basename(g).replace("gfs_", "").replace(".parquet", "")
+            gfs_by_month[mm] = g
+        if gfs_by_month:
+            print(f"  found {len(gfs_by_month)} GFS predictor shards")
+
     # 2. Stream shards one at a time, writing each joined shard to its OWN parquet file
     # in a directory. Never hold more than one joined shard in memory — concatenating
     # all 84 joined shards blows a 16 GB runner (OOM / exit 143). Training reads the
@@ -145,6 +160,16 @@ def main() -> int:
                 # Explicit availability flag: NBM only covers ~300/978 stations, so give
                 # the trees a clean 0/1 split instead of inferring from NaN columns.
                 joined["nbm_available"] = joined["nbm_air_temp_c"].notna().astype("float32")
+            # GFS second-model predictors: merge the matching month on the shard key.
+            mm = os.path.basename(s).replace("hrrr_", "").replace(".parquet", "")
+            if mm in gfs_by_month:
+                g = pd.read_parquet(gfs_by_month[mm])
+                g["init_time"] = pd.to_datetime(g["init_time"])
+                joined["init_time"] = pd.to_datetime(joined["init_time"])
+                joined = joined.merge(
+                    g, on=["station_id", "init_time", "lead_hour"], how="left"
+                )
+                joined["gfs_available"] = joined["gfs_temperature_2m"].notna().astype("float32")
             # Downcast floats to save disk + training memory.
             for c in joined.select_dtypes("float64").columns:
                 joined[c] = joined[c].astype("float32")

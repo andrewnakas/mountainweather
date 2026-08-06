@@ -25,6 +25,8 @@ dependencies = [
     "scipy>=1.11",
     "pyyaml>=6.0",
     "duckdb>=1.0",
+    "dynamical-catalog>=0.1",   # GFS second-model archive access (icechunk)
+    "icechunk>=0.1",
 ]
 
 [project.optional-dependencies]

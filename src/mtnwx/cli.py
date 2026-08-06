@@ -45,6 +45,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return hrrr.main(args)
 
 
+def _cmd_extract_gfs(args: argparse.Namespace) -> int:
+    from mtnwx.data import gfs
+
+    return gfs.main(args)
+
+
 def _cmd_train(args: argparse.Namespace) -> int:
     from mtnwx import train
 
@@ -100,6 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument("--workers", type=int, default=12, help="Concurrent init fetches")
     p_extract.add_argument("--network", default=None, help="Only extract this network (e.g. ASOS)")
     p_extract.set_defaults(func=_cmd_extract)
+
+    p_gfs = sub.add_parser("extract-gfs", help="Extract GFS predictors at stations (one month)")
+    p_gfs.add_argument("--month", required=True, help="Init-time month YYYY-MM")
+    p_gfs.add_argument("--stations", default=None, help="Stations+terrain parquet")
+    p_gfs.add_argument("--out", default=None, help="Output parquet path")
+    p_gfs.set_defaults(func=_cmd_extract_gfs)
 
     p_train = sub.add_parser("train", help="Train LightGBM quantile post-processors")
     p_train.add_argument("--table", default=None, help="Training table parquet")
