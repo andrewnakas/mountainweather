@@ -70,11 +70,16 @@ jobs:
           sid_hash = hashlib.md5("|".join(sorted(stations["station_id"].astype(str))).encode()).hexdigest()[:8]
           obs_key = f"obs/obs_{start}_{end}_n{len(stations)}_{sid_hash}.parquet"
 
-          print(f"Collecting obs {start}..{end} for {len(stations)} stations -> {obs_key}")
+          print(f"Collecting obs {start}..{end} for {len(stations)} stations -> {obs_key}", flush=True)
           obs = collect(stations, start, end)
-          print(f"  {len(obs)} obs rows")
+          print(f"  {len(obs)} obs rows; downcasting + writing...", flush=True)
+          # Shrink before upload: float32 + zstd roughly halves the ~1-2 GB file so the
+          # single-file upload is fast (a 9-min upload previously got runner-reclaimed).
+          for c in obs.select_dtypes("float64").columns:
+              obs[c] = obs[c].astype("float32")
           os.makedirs("data", exist_ok=True)
-          obs.to_parquet("data/obs_cache.parquet", index=False)
+          obs.to_parquet("data/obs_cache.parquet", index=False, compression="zstd")
+          print(f"  wrote {os.path.getsize('data/obs_cache.parquet')/1e6:.0f} MB; uploading...", flush=True)
           retry(upload_file, "data/obs_cache.parquet", obs_key, hub["datasets"]["verify"], repo_type="dataset")
-          print("cached ->", obs_key)
+          print("cached ->", obs_key, flush=True)
           PY
