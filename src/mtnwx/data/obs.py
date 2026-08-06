@@ -249,17 +249,22 @@ QC_MAX_STEP = {
 }
 
 
-def qc(df: pd.DataFrame, *, persistence_hours: int = 24) -> pd.DataFrame:
+def qc(df: pd.DataFrame, *, persistence_hours: int = 24, copy: bool = True) -> pd.DataFrame:
     """Quality-control an obs frame in place-safe fashion (returns a new frame).
 
     Applies range checks, hour-to-hour step limits, and a flatline/stuck-sensor
     screen (a value repeated unchanged for ``persistence_hours`` is nulled — a
     common failure mode of unheated mountain sensors). Dewpoint is also forced
     <= air temp. Rows with all measurements nulled are dropped.
+
+    ``copy=False`` skips the defensive copy (caller must not reuse ``df``) — important
+    for the full-catalogue collection where a 56.9M-row copy OOMs a 16 GB runner.
     """
     if df.empty:
         return df
-    out = df.copy().sort_values(["station_id", "valid_time"]).reset_index(drop=True)
+    src = df if not copy else df.copy()
+    out = src.sort_values(["station_id", "valid_time"]).reset_index(drop=True)
+    del src
 
     for col, (lo, hi) in QC_BOUNDS.items():
         if col in out:

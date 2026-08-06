@@ -100,8 +100,15 @@ def collect(
                     print(f"  [{done}/{n}] stations processed, {got} obs rows so far", flush=True)
     if not frames:
         return obs._empty()
+    # Downcast each frame to float32 BEFORE concat so peak memory (concat + the QC
+    # sort/groupby that follows) stays roughly halved — 56.9M rows x float64 OOM'd a
+    # 16 GB runner right after collection.
+    for f in frames:
+        for c in f.select_dtypes("float64").columns:
+            f[c] = f[c].astype("float32")
     allobs = pd.concat(frames, ignore_index=True)
-    return obs.qc(allobs)
+    frames.clear()
+    return obs.qc(allobs, copy=False)
 
 
 def main(args: argparse.Namespace) -> int:
