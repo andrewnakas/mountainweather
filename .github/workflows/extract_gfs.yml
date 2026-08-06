@@ -7,48 +7,76 @@ name: GFS backfill (2nd model)
 
 on:
   workflow_dispatch:
-    inputs:
-      start:
-        description: "First init-month YYYY-MM (GFS archive starts 2021-05)"
-        default: "2021-05"
-      end:
-        description: "Last init-month YYYY-MM (blank = month before today)"
-        default: ""
-      max_parallel:
-        description: "Max concurrent extraction jobs"
-        default: "10"
 
 permissions:
   contents: read
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      months: ${{ steps.gen.outputs.months }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - id: gen
-        run: |
-          END="${{ github.event.inputs.end }}"
-          if [ -z "$END" ]; then
-            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}")
-          else
-            M=$(python scripts/gen_month_matrix.py --start "${{ github.event.inputs.start }}" --end "$END")
-          fi
-          echo "months=$M" >> "$GITHUB_OUTPUT"
-
+  # Static month matrix (GFS archive 2021-05 .. 2025-12) — no separate plan job, whose
+  # runner kept failing to allocate and cancelling the whole run.
   extract:
-    needs: plan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      max-parallel: 10
       matrix:
-        month: ${{ fromJSON(needs.plan.outputs.months) }}
+        month:
+          - "2021-05"
+          - "2021-06"
+          - "2021-07"
+          - "2021-08"
+          - "2021-09"
+          - "2021-10"
+          - "2021-11"
+          - "2021-12"
+          - "2022-01"
+          - "2022-02"
+          - "2022-03"
+          - "2022-04"
+          - "2022-05"
+          - "2022-06"
+          - "2022-07"
+          - "2022-08"
+          - "2022-09"
+          - "2022-10"
+          - "2022-11"
+          - "2022-12"
+          - "2023-01"
+          - "2023-02"
+          - "2023-03"
+          - "2023-04"
+          - "2023-05"
+          - "2023-06"
+          - "2023-07"
+          - "2023-08"
+          - "2023-09"
+          - "2023-10"
+          - "2023-11"
+          - "2023-12"
+          - "2024-01"
+          - "2024-02"
+          - "2024-03"
+          - "2024-04"
+          - "2024-05"
+          - "2024-06"
+          - "2024-07"
+          - "2024-08"
+          - "2024-09"
+          - "2024-10"
+          - "2024-11"
+          - "2024-12"
+          - "2025-01"
+          - "2025-02"
+          - "2025-03"
+          - "2025-04"
+          - "2025-05"
+          - "2025-06"
+          - "2025-07"
+          - "2025-08"
+          - "2025-09"
+          - "2025-10"
+          - "2025-11"
+          - "2025-12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
