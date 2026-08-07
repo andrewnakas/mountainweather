@@ -36,7 +36,7 @@ def skill_vs_benchmark(headline_df: pd.DataFrame, benchmark: str = "nbm") -> pd.
         if "mtnwx" not in g:
             continue
         ours = g["mtnwx"]
-        for bench in ("nbm", "raw_hrrr", "hrrr_lapse", "persistence"):
+        for bench in ("nbm", "raw_hrrr", "raw_gfs", "hrrr_lapse", "persistence"):
             if bench in g and g[bench] > 0:
                 rows.append(
                     {

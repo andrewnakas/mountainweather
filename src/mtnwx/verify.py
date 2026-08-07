@@ -111,19 +111,25 @@ def score_frame(
     mtnwx_point: np.ndarray,
     mtnwx_quantiles: dict[float, np.ndarray] | None = None,
     nbm_col: str | None = None,
+    base_label: str = "raw_hrrr",
 ) -> pd.DataFrame:
     """Score every forecast against ``target`` obs; return long metrics by lead+band.
 
-    ``df`` must contain the target obs column, the raw HRRR field, elevation_delta_m,
-    lead_hour, and (optionally) the NBM column. Returns one row per
-    (forecast, lead_group, elevation_band) with mae/rmse/bias (+ crps for mtnwx)."""
+    ``df`` must contain the target obs column, the raw base-model field
+    (``hrrr_field``), elevation_delta_m, lead_hour, and (optionally) the NBM column.
+    ``base_label`` names the raw NWP baseline row — "raw_hrrr" for the US model,
+    "raw_gfs" for the global model, whose base forecast is GFS not HRRR. Returns one
+    row per (forecast, lead_group, elevation_band) with mae/rmse/bias (+ crps for
+    mtnwx). A raw-base field absent from ``df`` yields NaN (dropped downstream), so the
+    baseline label must match the field actually present, or the comparison is empty."""
     obs = df[target].to_numpy()
     forecasts: dict[str, np.ndarray] = {
         "mtnwx": mtnwx_point,
-        "raw_hrrr": df[hrrr_field].to_numpy() if hrrr_field in df.columns else np.full(len(df), np.nan),
+        base_label: df[hrrr_field].to_numpy() if hrrr_field in df.columns else np.full(len(df), np.nan),
         "persistence": persistence_forecast(df, target, target),
     }
-    if target == "air_temp_c":
+    # Lapse-corrected temp is a HRRR-elevation trick; keep it only for the HRRR base.
+    if target == "air_temp_c" and base_label == "raw_hrrr":
         forecasts["hrrr_lapse"] = lapse_corrected_temp(df)
     if nbm_col and nbm_col in df.columns:
         forecasts["nbm"] = df[nbm_col].to_numpy()

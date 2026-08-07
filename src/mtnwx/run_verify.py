@@ -23,6 +23,15 @@ from mtnwx.report import write_report
 from mtnwx.train import make_splits
 from mtnwx.verify import score_frame
 
+# Raw-GFS baseline columns in the GLOBAL training table (see build_training_table_global).
+# GFS has no gust product, so wind_gust_ms has no raw-GFS baseline (falls to persistence).
+GFS_BASE_FIELD = {
+    "air_temp_c": "gfs_temperature_2m",
+    "relative_humidity_pct": "gfs_relative_humidity_2m",
+    "wind_speed_ms": "gfs_wind_speed_10m",
+    "precip_1h_mm": "gfs_precip_mm",
+}
+
 
 def _load_models(models_dir: Path):
     import json
@@ -97,6 +106,8 @@ def main(args: argparse.Namespace) -> int:
         "precip_1h_mm": "nbm_precip_1h_mm",
     }
 
+    import os
+    is_global = os.environ.get("MTNWX_REGION") == "global"
     all_metrics = []
     X = test[feats].astype("float32")
     for target, boosters in models.items():
@@ -104,10 +115,19 @@ def main(args: argparse.Namespace) -> int:
             continue
         point = boosters[0.5].predict(X) if 0.5 in boosters else None
         quantiles = {q: b.predict(X) for q, b in boosters.items()}
-        hrrr_field = TARGET_SPEC.get(target, {}).get("hrrr_field", "")
+        # Region-aware raw-NWP baseline. The US model's base is HRRR; the global model's
+        # base is GFS, whose forecast columns are gfs_* in the global training table.
+        # Picking the wrong field name yields an all-NaN baseline (empty comparison),
+        # which is exactly why the first global scorecard had no skill_vs_benchmark rows.
+        if is_global:
+            base_field = GFS_BASE_FIELD.get(target, "")
+            base_label = "raw_gfs"
+        else:
+            base_field = TARGET_SPEC.get(target, {}).get("hrrr_field", "")
+            base_label = "raw_hrrr"
         m = score_frame(
-            test, target, hrrr_field, point, quantiles,
-            nbm_col=nbm_map.get(target),
+            test, target, base_field, point, quantiles,
+            nbm_col=nbm_map.get(target), base_label=base_label,
         )
         all_metrics.append(m)
 
