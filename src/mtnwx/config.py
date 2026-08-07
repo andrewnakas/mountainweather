@@ -31,9 +31,17 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=2)
 def load_configs(config_dir: str | None = None) -> dict[str, Any]:
-    """Load and cache all config YAMLs into one dict keyed by config name."""
+    """Load and cache all config YAMLs into one dict keyed by config name.
+
+    ``cfg["region"]`` resolves to the ACTIVE region — chosen by the ``MTNWX_REGION``
+    env var, else the region YAML's ``active`` key (default western_conus). This lets
+    the same pipeline run for the western-US model or the global model without code
+    changes: set MTNWX_REGION=global.
+    """
+    import os
+
     base = Path(config_dir) if config_dir else CONFIG_DIR
     out: dict[str, Any] = {}
     for key, fname in _CONFIG_FILES.items():
@@ -41,6 +49,13 @@ def load_configs(config_dir: str | None = None) -> dict[str, Any]:
         if not path.exists():
             raise FileNotFoundError(f"Missing config: {path}")
         out[key] = _load_yaml(path)
+
+    region = out["region"]
+    if "regions" in region:
+        active = os.environ.get("MTNWX_REGION") or region.get("active", "western_conus")
+        if active not in region["regions"]:
+            raise ValueError(f"MTNWX_REGION={active} not in region config")
+        out["region"] = {**region["regions"][active], "_active": active}
     return out
 
 

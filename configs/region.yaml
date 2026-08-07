@@ -1,20 +1,32 @@
-# Region definition. Western CONUS mountains first (densest mountain obs on Earth,
-# fully inside the HRRR domain). Architecture is region-agnostic — expand by editing
-# this file. Bounds are a generous lon/lat box; per-station mountain filtering
-# (elevation + local relief) happens in station selection, not here.
+# Region definition. Two regions are defined; pick one with MTNWX_REGION env var
+# (defaults to western_conus). The architecture is region-agnostic — the same pipeline
+# runs for either by reading these bounds + filters.
 
+active: western_conus          # override with env MTNWX_REGION=global
+
+regions:
+  # Western CONUS mountains — the original, proven zone (densest mountain obs on Earth,
+  # fully inside HRRR's 3km domain). mtnwx beats NBM here on temp/gust.
+  western_conus:
+    name: western_conus
+    description: Western CONUS mountain zone (Cascades, Sierra, Rockies, Great Basin)
+    bounds: { lon_min: -125.0, lon_max: -103.0, lat_min: 31.0, lat_max: 49.5 }
+    # Mountain-station selection (applied in stations.py).
+    station_filter: { min_elevation_m: 1200, min_local_relief_m: 300, relief_radius_km: 10.0 }
+    networks: [SNOTEL, ASOS]     # SNOTEL (US mountain) + ASOS airports
+
+  # Global — worldwide airports (ASOS ~4,000 stations) as ground truth, GFS/ECMWF as the
+  # global base model, HRRR still used where it covers (US). No mountain filter: include
+  # ALL global sensors, not just mountains.
+  global:
+    name: global
+    description: Worldwide surface stations + global NWP (GFS/ECMWF blend, HRRR over US)
+    bounds: { lon_min: -180.0, lon_max: 180.0, lat_min: -75.0, lat_max: 80.0 }
+    station_filter: { min_elevation_m: -100, min_local_relief_m: 0, relief_radius_km: 10.0 }
+    networks: [ASOS]             # global airport obs (SNOTEL is US-only; add regional nets later)
+
+# Backwards-compat: legacy top-level keys mirror the active region so existing code that
+# reads cfg['region']['bounds'] / ['station_filter'] keeps working.
 name: western_conus
-description: Western CONUS mountain zone (Cascades, Sierra, Rockies, Great Basin ranges)
-
-# Bounding box (WGS84). Kept slightly wide of the Rockies' east front.
-bounds:
-  lon_min: -125.0
-  lon_max: -103.0
-  lat_min: 31.0
-  lat_max: 49.5
-
-# Mountain-station selection thresholds (applied in stations.py).
-station_filter:
-  min_elevation_m: 1200        # valley floors of the interior west start here
-  min_local_relief_m: 300      # elevation range within ~10 km — screens out flat high desert
-  relief_radius_km: 10.0
+bounds: { lon_min: -125.0, lon_max: -103.0, lat_min: 31.0, lat_max: 49.5 }
+station_filter: { min_elevation_m: 1200, min_local_relief_m: 300, relief_radius_km: 10.0 }

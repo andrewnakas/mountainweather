@@ -150,12 +150,16 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
     """Assemble, dedupe, and filter the mountain station catalogue."""
     cfg = load_configs()
     region = cfg["region"]
+    nets = region.get("networks", ["SNOTEL", "ASOS"])
 
-    rows = fetch_snotel_stations()
+    rows = []
+    # SNOTEL is US-mountain-only — include it only when the region asks for it.
+    if "SNOTEL" in nets:
+        rows += fetch_snotel_stations()
 
-    # ASOS/AWOS airports (incl. high mountain passes) from dynamical.org — the wind &
-    # gust ground truth SNOTEL lacks. Additive; skip on any failure.
-    if not getattr(build_catalogue, "_no_asos", False):
+    # ASOS/AWOS airports from dynamical.org — global airport network (~4,000 stations
+    # worldwide). The wind & gust ground truth SNOTEL lacks, and the basis for global.
+    if "ASOS" in nets and not getattr(build_catalogue, "_no_asos", False):
         try:
             from mtnwx.data.asos import select_stations as asos_select
 
@@ -166,7 +170,7 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
             print(f"WARN: ASOS fetch failed ({exc}); continuing without it")
 
     token = os.environ.get("SYNOPTIC_API_TOKEN")
-    if token:
+    if "SYNOPTIC" in nets and token:
         try:
             rows += fetch_synoptic_stations(region["bounds"], token)
         except Exception as exc:  # noqa: BLE001 — Synoptic is optional
