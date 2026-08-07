@@ -1,15 +1,21 @@
 name: Build station catalogue
 
-# Build the mountain station catalogue (SNOTEL + optional Synoptic), compute terrain
-# features from the Copernicus DEM, and publish stations_terrain.parquet to the HF
-# stations dataset. Runs on Actions because the DEM COG reads are fast from AWS-adjacent
-# runners (slow from a home connection). Run once, then re-run when the station set
-# changes. The backfill and training read the published catalogue.
+# Build a station catalogue for a region (western_conus | global), compute terrain, and
+# publish region-suffixed parquet to the HF stations dataset:
+#   western_conus -> stations.parquet / stations_terrain.parquet   (legacy names kept)
+#   global        -> stations_global.parquet / stations_terrain_global.parquet
+# The backfill and training read the matching region file. Runs on Actions (fast DEM
+# reads). Global terrain over 4,000 worldwide airports can be skipped (mostly flat).
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 1 * *"   # monthly, in case new SNOTEL sites come online
+    inputs:
+      region:
+        description: "Region: western_conus or global"
+        default: "western_conus"
+      skip_terrain:
+        description: "Skip terrain (set true for global to publish faster)"
+        default: "false"
 
 permissions:
   contents: read
@@ -17,6 +23,8 @@ permissions:
 jobs:
   catalogue:
     runs-on: ubuntu-latest
+    env:
+      MTNWX_REGION: ${{ github.event.inputs.region }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,23 +34,41 @@ jobs:
       - name: Install
         run: pip install -e ".[train,terrain]"
 
+      - name: Region-suffixed filenames
+        id: names
+        run: |
+          if [ "${{ github.event.inputs.region }}" = "global" ]; then
+            echo "stations=stations_global.parquet" >> "$GITHUB_OUTPUT"
+            echo "terrain=stations_terrain_global.parquet" >> "$GITHUB_OUTPUT"
+          else
+            echo "stations=stations.parquet" >> "$GITHUB_OUTPUT"
+            echo "terrain=stations_terrain.parquet" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build stations
         env:
           SYNOPTIC_API_TOKEN: ${{ secrets.SYNOPTIC_API_TOKEN }}
-        run: python -m mtnwx.cli stations --out data/stations.parquet
+        run: python -m mtnwx.cli stations --out data/${{ steps.names.outputs.stations }}
 
       - name: Compute terrain features
-        run: python -m mtnwx.cli terrain --stations data/stations.parquet --out data/stations_terrain.parquet
+        if: github.event.inputs.skip_terrain != 'true'
+        run: python -m mtnwx.cli terrain --stations data/${{ steps.names.outputs.stations }} --out data/${{ steps.names.outputs.terrain }}
+
+      - name: No-terrain fallback (copy stations as the terrain file)
+        if: github.event.inputs.skip_terrain == 'true'
+        run: cp data/${{ steps.names.outputs.stations }} data/${{ steps.names.outputs.terrain }}
 
       - name: Publish catalogue to HF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python - <<'PY'
+          import os
           from mtnwx.data.hub_io import upload_file
           from mtnwx.config import load_configs
           repo = load_configs()["hub"]["datasets"]["stations"]
-          upload_file("data/stations.parquet", "stations.parquet", repo, repo_type="dataset")
-          upload_file("data/stations_terrain.parquet", "stations_terrain.parquet", repo, repo_type="dataset")
-          print("published stations + terrain catalogue")
+          s = "${{ steps.names.outputs.stations }}"; t = "${{ steps.names.outputs.terrain }}"
+          upload_file(f"data/{s}", s, repo, repo_type="dataset")
+          upload_file(f"data/{t}", t, repo, repo_type="dataset")
+          print("published", s, "+", t)
           PY
