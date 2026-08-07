@@ -1,0 +1,117 @@
+name: GFS backfill (GLOBAL)
+
+# Extract GFS predictors at the ~4,000 GLOBAL stations into gfs_global/ shards. GFS is a
+# global 0.25° model, so this covers the whole world — the base forecast for the global
+# model (HRRR stays the US base; ECMWF is a later 3rd blend member). MVP window 2024-2025.
+# Reads the global catalogue (stations_terrain_global.parquet). Resumable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: "Max concurrent extraction jobs"
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        month:
+          - "2024-01"
+          - "2024-02"
+          - "2024-03"
+          - "2024-04"
+          - "2024-05"
+          - "2024-06"
+          - "2024-07"
+          - "2024-08"
+          - "2024-09"
+          - "2024-10"
+          - "2024-11"
+          - "2024-12"
+          - "2025-01"
+          - "2025-02"
+          - "2025-03"
+          - "2025-04"
+          - "2025-05"
+          - "2025-06"
+          - "2025-07"
+          - "2025-08"
+          - "2025-09"
+          - "2025-10"
+          - "2025-11"
+          - "2025-12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"     # dynamical-catalog>=0.8 needs 3.12
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train,gfs]"
+
+      - name: Require HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: '[ -n "$HF_TOKEN" ] || { echo "::error::HF_TOKEN empty"; exit 1; }'
+
+      - name: Fetch GLOBAL station catalogue from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          from mtnwx.config import load_configs
+          import shutil, os
+          repo = load_configs()["hub"]["datasets"]["stations"]
+          os.makedirs("data", exist_ok=True)
+          for name in ("stations_terrain_global.parquet", "stations_global.parquet"):
+              try:
+                  p = hf_hub_download(repo, name, repo_type="dataset")
+                  shutil.copy(p, f"data/{name}"); print("got", name)
+              except Exception as e:
+                  print("skip", name, e)
+          PY
+
+      - name: Skip if GFS-global shard already on HF
+        id: check
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["datasets"]["training"]
+          api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+          try: files = set(api.list_repo_files(repo, repo_type="dataset"))
+          except Exception: files = set()
+          target = f"gfs_global/gfs_${{ matrix.month }}.parquet"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"exists={'1' if target in files else '0'}\n")
+          PY
+
+      - name: Extract GFS month (global stations)
+        if: steps.check.outputs.exists == '0'
+        run: |
+          ST=data/stations_terrain_global.parquet
+          [ -f "$ST" ] || ST=data/stations_global.parquet
+          python -m mtnwx.cli extract-gfs --month "${{ matrix.month }}" --stations "$ST"
+
+      - name: Upload GFS-global shard to HF
+        if: steps.check.outputs.exists == '0'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          from mtnwx.data.hub_io import upload_shard
+          m = "${{ matrix.month }}"
+          upload_shard(f"data/gfs_{m}.parquet", f"gfs_global/gfs_{m}.parquet", which="training")
+          print("uploaded GFS-global", m)
+          PY
