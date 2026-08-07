@@ -97,7 +97,14 @@ def main() -> int:
         stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], "stations_global.parquet", repo_type="dataset"))
     print(f"global stations: {len(stations)}")
 
-    shard_dir = snapshot_download(hub["datasets"]["training"], repo_type="dataset")
+    # Download ONLY the global GFS shards. The training repo also holds ~10 GB of US
+    # HRRR/GFS/ASOS shards; a full snapshot_download pulls all 16.6 GB and fills the
+    # GitHub runner's ~14 GB disk, killing the job at ~2-4 min ("operation canceled").
+    # allow_patterns keeps the download to the ~5 GB we actually join.
+    shard_dir = snapshot_download(
+        hub["datasets"]["training"], repo_type="dataset",
+        allow_patterns=["gfs_global/*.parquet"],
+    )
     shards = sorted(glob.glob(f"{shard_dir}/gfs_global/gfs_*.parquet"))
     if not shards:
         print("ERROR: no gfs_global shards found — run extract_gfs_global.yml first")
