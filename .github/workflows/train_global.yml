@@ -28,9 +28,15 @@ jobs:
       - name: Install
         run: pip install -e ".[train,terrain]"
 
+      - name: Free runner disk (drop unused SDKs) + show mem
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h / | tail -1; free -h | head -2
+
       - name: Build GLOBAL training table (GFS base + global obs)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONUNBUFFERED: "1"   # flush prints so an OOM (143) doesn't hide progress
         run: python scripts/build_training_table_global.py
 
       - name: Train GLOBAL models

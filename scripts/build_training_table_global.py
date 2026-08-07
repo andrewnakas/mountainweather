@@ -64,19 +64,26 @@ def add_terrain(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     return df.merge(st, on="station_id", how="left")
 
 
-def build_global_table(gfs: pd.DataFrame, obs: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
+OBS_JOIN_COLS = ["station_id", "valid_time", "air_temp_c", "relative_humidity_pct",
+                 "wind_speed_ms", "wind_gust_ms", "dewpoint_c", "precip_1h_mm"]
+
+
+def prepare_obs(obs: pd.DataFrame) -> pd.DataFrame:
+    """Trim obs to the join columns once, datetime-parsed, so the per-shard merge
+    never copies the full 50M-row frame (that per-shard copy OOM-killed the runner)."""
+    keep = [c for c in OBS_JOIN_COLS if c in obs.columns]
+    o = obs[keep].copy()
+    o["valid_time"] = pd.to_datetime(o["valid_time"])
+    return o
+
+
+def build_global_table(gfs: pd.DataFrame, obs_slim: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     df = add_gfs_derived(gfs)
     df = add_time_features(df, stations)   # adds lat/lon (+ solar) from stations
     df = add_terrain(df, stations)         # adds elevation + terrain (no lat/lon dup)
     df["valid_time"] = pd.to_datetime(df["valid_time"])
-    obs_use = obs.copy()
-    obs_use["valid_time"] = pd.to_datetime(obs_use["valid_time"])
-    merged = df.merge(
-        obs_use[["station_id", "valid_time", "air_temp_c", "relative_humidity_pct",
-                 "wind_speed_ms", "wind_gust_ms", "dewpoint_c", "precip_1h_mm"]],
-        on=["station_id", "valid_time"], how="inner",
-    )
-    return merged
+    # obs_slim is already trimmed + datetime-parsed (see prepare_obs) — no copy here.
+    return df.merge(obs_slim, on=["station_id", "valid_time"], how="inner")
 
 
 def main() -> int:
@@ -127,8 +134,11 @@ def main() -> int:
     obs = None
     if not args.no_obs_cache:
         try:
-            obs = pd.read_parquet(hf_hub_download(hub["datasets"]["verify"], obs_key, repo_type="dataset"))
-            print(f"loaded cached global obs ({len(obs)} rows)")
+            # Read ONLY the join columns from the 491 MB parquet — loading all columns
+            # of the ~50M-row frame is what pushed the 7 GB runner into OOM (exit 143).
+            obs_path = hf_hub_download(hub["datasets"]["verify"], obs_key, repo_type="dataset")
+            obs = pd.read_parquet(obs_path, columns=[c for c in OBS_JOIN_COLS])
+            print(f"loaded cached global obs ({len(obs)} rows, {len(obs.columns)} cols)")
         except Exception:
             obs = None
     if obs is None:
@@ -145,6 +155,10 @@ def main() -> int:
                 print(f"WARN: obs cache upload failed ({e})")
     print(f"  {len(obs)} global obs rows")
 
+    # Prep obs ONCE (trim + datetime) so the per-shard merge never copies it.
+    obs_slim = prepare_obs(obs)
+    del obs
+
     out = Path(args.out) if args.out else dd / "training_table_global"
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("part-*.parquet"):
@@ -152,7 +166,7 @@ def main() -> int:
     total = written = 0
     for i, s in enumerate(shards, 1):
         gfs = pd.read_parquet(s)
-        joined = build_global_table(gfs, obs, stations)
+        joined = build_global_table(gfs, obs_slim, stations)
         if not joined.empty:
             for c in joined.select_dtypes("float64").columns:
                 joined[c] = joined[c].astype("float32")
