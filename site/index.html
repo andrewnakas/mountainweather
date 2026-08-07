@@ -26,6 +26,8 @@
 
     #map { flex:1; width:100%; background:#0b0f14; }
     .leaflet-container { background:#0b0f14; }
+    /* screen-blend the hillshade so ridges lift out of the dark base instead of darkening it */
+    .hillshade { mix-blend-mode:screen; filter:contrast(1.15) brightness(0.85); }
 
     /* control bar */
     #controls { position:absolute; left:50%; transform:translateX(-50%); bottom:16px;
@@ -106,10 +108,22 @@
   let DATA=null, PTS=[], activeVar="wind_speed_ms", t=0, nHours=48, playing=false, timer=null;
 
   //---------------------------------------------------------------- map
-  const map = L.map("map", { zoomControl:true, preferCanvas:true }).setView([41.5,-113.5], 5.4);
-  // Dark terrain basemap so the wind field reads over the land.
+  const map = L.map("map", { zoomControl:true, preferCanvas:true, worldCopyJump:true })
+    .setView([41.5,-113.5], 5.4);
+  // Dark base for contrast, then a global hillshade so the wind field reads over the
+  // actual TERRAIN (mountains, ranges). Both are global tile sets — the map works
+  // anywhere, not just the western US.
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    maxZoom:12, attribution:"© OpenStreetMap © CARTO",
+    maxZoom:14, attribution:"© OpenStreetMap © CARTO", subdomains:"abcd",
+  }).addTo(map);
+  // ESRI World Hillshade (global, free, no key) — screen-blended to lift the ridges.
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom:14, opacity:0.5, className:"hillshade",
+    attribution:"Hillshade © Esri",
+  }).addTo(map);
+  // Faint labels/roads on top so place names stay readable over the field.
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png", {
+    maxZoom:14, opacity:0.55, subdomains:"abcd", pane:"shadowPane",
   }).addTo(map);
 
   // Canvas overlay that draws the interpolated field + wind particles over the land.
@@ -198,26 +212,38 @@
     ctx.clearRect(0,0,W,H);
     if(!sp.length){ drawTime(); return; }
 
-    // coarse IDW grid tint (the "over the land" field)
-    const step=14, R2=170*170;
-    const img=ctx.createImageData(W,H); const D=img.data;
-    // precompute per-cell color, then paint blocks
-    for(let gy=0; gy<H; gy+=step){
-      for(let gx=0; gx<W; gx+=step){
-        let sw=0, sv=0, near=1e9;
-        for(const st of sp){ const dx=gx-st.x, dy=gy-st.y; const d2=dx*dx+dy*dy+1;
-          if(d2<near) near=d2; const w=1/(d2*d2); sw+=w; sv+=w*st.v; }
-        if(sw===0||near>R2*9) continue;   // don't paint far from any station
-        const val=sv/sw; const [r,g,b]=colorFor(val);
-        const a = Math.max(28, 150 - Math.sqrt(near)/2.2); // fade away from stations
-        for(let yy=gy; yy<Math.min(gy+step,H); yy++){
-          for(let xx=gx; xx<Math.min(gx+step,W); xx++){
-            const idx=(yy*W+xx)*4; D[idx]=r; D[idx+1]=g; D[idx+2]=b; D[idx+3]=a;
-          }
-        }
+    // SMOOTH continuous field (no blocky "blotches"): compute a proper IDW value on a
+    // coarse grid, then let the browser bilinearly upscale it. IDW = Σ(w·v)/Σw with
+    // w = 1/d², so the result is a true weighted average (never over-saturates the way
+    // additive splatting does). Coverage (Σw, i.e. nearness to any station) sets alpha
+    // so sparse areas fade out. The coarse grid + smoothing upscale = smooth field, fast.
+    const dom=VARS[activeVar].dom, span=(dom[1]-dom[0])||1;
+    const GS=10;                                   // grid cell (px) — small enough to look smooth after upscale
+    const gw=Math.ceil(W/GS)+1, gh=Math.ceil(H/GS)+1;
+    const grid=fieldCanvas(gw,gh);                 // offscreen low-res field
+    const gimg=grid.createImageData(gw,gh); const G=gimg.data;
+    for(let gy=0; gy<gh; gy++){
+      for(let gx=0; gx<gw; gx++){
+        const px=gx*GS, py=gy*GS;
+        let sw=0, sv=0;
+        for(const st of sp){ const dx=px-st.x, dy=py-st.y; const d2=dx*dx+dy*dy+1;
+          const w=1/(d2*d2); sw+=w; sv+=w*st.v; }
+        const idx=(gy*gw+gx)*4;
+        if(sw<1e-9){ G[idx+3]=0; continue; }
+        const val=sv/sw;                           // true IDW weighted mean (bounded to data range)
+        const [r,g,b]=colorFor(val);
+        // coverage: distance to nearest station via Σw; near a station -> opaque, far -> fade
+        const cover=Math.sqrt(sw);                 // grows as you approach stations
+        G[idx]=r; G[idx+1]=g; G[idx+2]=b;
+        G[idx+3]=Math.max(0, Math.min(170, cover*9000));
       }
     }
-    ctx.putImageData(img,0,0);
+    grid.putImageData(gimg,0,0);
+    // upscale the coarse field with smoothing enabled -> smooth continuous look
+    ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high";
+    ctx.globalAlpha=0.92;
+    ctx.drawImage(grid.canvas, 0,0, gw,gh, 0,0, gw*GS, gh*GS);
+    ctx.globalAlpha=1;
 
     // wind direction arrows (only for wind vars) — quiver over the land
     if(activeVar.startsWith("wind")){
@@ -232,6 +258,14 @@
       }
     }
     drawStations(sp); drawTime();
+  }
+
+  // Reused offscreen canvas for the coarse IDW field (resized on demand).
+  let _fc=null;
+  function fieldCanvas(W,H){
+    if(!_fc){ const c=document.createElement("canvas"); _fc=c.getContext("2d",{willReadFrequently:true}); }
+    if(_fc.canvas.width!==W || _fc.canvas.height!==H){ _fc.canvas.width=W; _fc.canvas.height=H; }
+    return _fc;
   }
 
   function arrow(x,y,dx,dy,len){
