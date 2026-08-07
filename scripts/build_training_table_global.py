@@ -56,15 +56,18 @@ def add_gfs_derived(gfs: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_terrain(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
-    keep = ["station_id", "lat", "lon", "elevation_m"] + [c for c in stations.columns if c in TERRAIN_FEATURES]
+    # Merge elevation + terrain features only. lat/lon are added by add_time_features
+    # (it needs them for solar elevation) — merging them here too would collide into
+    # lat_x/lat_y and drop the `lat` column (KeyError downstream).
+    keep = ["station_id", "elevation_m"] + [c for c in stations.columns if c in TERRAIN_FEATURES]
     st = stations[list(dict.fromkeys(keep))].copy()
     return df.merge(st, on="station_id", how="left")
 
 
 def build_global_table(gfs: pd.DataFrame, obs: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     df = add_gfs_derived(gfs)
-    df = add_terrain(df, stations)
-    df = add_time_features(df, stations)
+    df = add_time_features(df, stations)   # adds lat/lon (+ solar) from stations
+    df = add_terrain(df, stations)         # adds elevation + terrain (no lat/lon dup)
     df["valid_time"] = pd.to_datetime(df["valid_time"])
     obs_use = obs.copy()
     obs_use["valid_time"] = pd.to_datetime(obs_use["valid_time"])
