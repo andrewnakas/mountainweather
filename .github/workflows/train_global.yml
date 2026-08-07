@@ -1,0 +1,63 @@
+name: Train + Verify (GLOBAL)
+
+# Global model: build the training table from GFS-global shards + global ASOS obs, train
+# LightGBM quantile models, verify, and push to the models repo under a global/ prefix.
+# GFS is the base (worldwide); no HRRR outside the US. Runs with MTNWX_REGION=global.
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Comma-separated targets (blank = default)"
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    env:
+      MTNWX_REGION: global
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train,terrain]"
+
+      - name: Build GLOBAL training table (GFS base + global obs)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_training_table_global.py
+
+      - name: Train GLOBAL models
+        run: |
+          ARGS="--table data/training_table_global --out data/models_global"
+          if [ -n "${{ github.event.inputs.targets }}" ]; then ARGS="$ARGS --targets ${{ github.event.inputs.targets }}"; fi
+          python -m mtnwx.cli train $ARGS
+
+      - name: Verify GLOBAL vs GFS/persistence
+        continue-on-error: true
+        run: python -m mtnwx.cli verify --table data/training_table_global --models data/models_global --out data/verify_global --no-nbm --verify-rows 3000000 || echo "verify warnings"
+
+      - name: Push GLOBAL models + scorecard to HF
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import glob, os
+          from mtnwx.data.hub_io import upload_file
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["models"]["repo"]
+          for f in glob.glob("data/models_global/*"):
+              if os.path.isfile(f):
+                  upload_file(f, f"global/{os.path.basename(f)}", repo, repo_type="model")
+          for f in glob.glob("data/verify_global/*"):
+              if os.path.isfile(f):
+                  upload_file(f, f"global/verify/{os.path.basename(f)}", repo, repo_type="model")
+          print("pushed global models + scorecard")
+          PY
