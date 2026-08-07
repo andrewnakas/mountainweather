@@ -103,10 +103,18 @@ def main() -> int:
         print("ERROR: no gfs_global shards found — run extract_gfs_global.yml first")
         return 1
     months = sorted(os.path.basename(s).replace("gfs_", "").replace(".parquet", "") for s in shards)
-    start = pd.Timestamp(months[0] + "-01").date()
-    end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
+    shard_start = pd.Timestamp(months[0] + "-01").date()
+    shard_end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
 
-    # Global obs (cached on HF, keyed by window+station-set).
+    # Global obs cache: keyed on the FULL MVP window (2024-01..2025-12) + station-set,
+    # NOT the shard window. The shard window drifts as the backfill adds months, so a
+    # shard-derived key changes every run and misses the cache — triggering a slow
+    # (~3 min) ASOS re-collection that keeps getting killed by runner reclaims. Pinning
+    # the key to the full window means the cache always hits once obs are collected once;
+    # we collect the whole window and filter to the shards we actually have below.
+    start = pd.Timestamp("2024-01-01").date()
+    end = pd.Timestamp("2025-12-31").date()
+    print(f"shard window {shard_start}..{shard_end}; obs cache window {start}..{end}")
     sid_hash = hashlib.md5("|".join(sorted(stations["station_id"].astype(str))).encode()).hexdigest()[:8]
     obs_key = f"obs/obsG_{start}_{end}_n{len(stations)}_{sid_hash}.parquet"
     obs = None
