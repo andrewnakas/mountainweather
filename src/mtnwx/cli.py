@@ -51,6 +51,12 @@ def _cmd_extract_gfs(args: argparse.Namespace) -> int:
     return gfs.main(args)
 
 
+def _cmd_extract_ecmwf(args: argparse.Namespace) -> int:
+    from mtnwx.data import ecmwf
+
+    return ecmwf.main(args)
+
+
 def _cmd_train(args: argparse.Namespace) -> int:
     from mtnwx import train
 
@@ -112,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_gfs.add_argument("--stations", default=None, help="Stations+terrain parquet")
     p_gfs.add_argument("--out", default=None, help="Output parquet path")
     p_gfs.set_defaults(func=_cmd_extract_gfs)
+
+    p_ecmwf = sub.add_parser("extract-ecmwf", help="Extract ECMWF AIFS predictors at stations (one month)")
+    p_ecmwf.add_argument("--month", required=True, help="Init-time month YYYY-MM")
+    p_ecmwf.add_argument("--stations", default=None, help="Stations+terrain parquet")
+    p_ecmwf.add_argument("--out", default=None, help="Output parquet path")
+    p_ecmwf.set_defaults(func=_cmd_extract_ecmwf)
 
     p_train = sub.add_parser("train", help="Train LightGBM quantile post-processors")
     p_train.add_argument("--table", default=None, help="Training table parquet")
