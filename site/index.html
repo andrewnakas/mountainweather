@@ -143,13 +143,25 @@
   function colorFor(v){ const c=VARS[activeVar]; const x=(v-c.dom[0])/(c.dom[1]-c.dom[0]); return ramp(c.ramp,x); }
 
   //---------------------------------------------------------------- data load
-  fetch("forecast.json").then(r=>{ if(!r.ok) throw 0; return r.json(); }).then(data=>{
-    DATA=data;
-    const anyT = data.features.find(f=>f.properties.valid_times);
+  // Load the GLOBAL forecast (worldwide, GFS+ECMWF, includes precip) and the US forecast
+  // (denser, HRRR-based) and merge them: global gives coverage everywhere, US adds density
+  // where it exists. Either alone is fine; if neither loads, show "warming up".
+  const tryJson = u => fetch(u).then(r=>{ if(!r.ok) throw 0; return r.json(); }).catch(()=>null);
+  Promise.all([tryJson("forecast_global.json"), tryJson("forecast.json")]).then(([gl, us])=>{
+    const primary = gl || us;                       // prefer global for coverage + precip
+    if(!primary) throw 0;
+    DATA = primary;
+    // Merge station features, de-duplicating by station_id (US wins on overlap: it's the
+    // higher-resolution HRRR post-processor in its domain).
+    const byId = new Map();
+    (gl?.features||[]).forEach(f=>byId.set(f.properties.station_id, f));
+    (us?.features||[]).forEach(f=>byId.set(f.properties.station_id, f));
+    const feats = [...byId.values()];
+    const anyT = feats.find(f=>f.properties.valid_times);
     nHours = Math.min(48, (anyT?.properties.valid_times||[]).length || 48);
     document.getElementById("time").max = nHours-1;
     // Precompute station point list with per-hour arrays.
-    PTS = data.features.filter(f=>f.geometry.coordinates[0]!=null).map(f=>{
+    PTS = feats.filter(f=>f.geometry.coordinates[0]!=null).map(f=>{
       const fc=f.properties.forecast||{};
       const dir=(fc.wind_dir_deg||{}).point||[];
       const grab=k=>((fc[k]||{}).point||[]);
@@ -157,8 +169,9 @@
                name:f.properties.name, elev:f.properties.elevation_m,
                vals:Object.fromEntries(ORDER.map(k=>[k,grab(k)])), dir, f };
     });
+    const src = gl && us ? "GFS+ECMWF global · HRRR US" : gl ? "GFS+ECMWF global" : "HRRR US";
     document.getElementById("init").textContent =
-      "init "+(data.init_time||"?").replace("T"," ").slice(0,16)+"Z · "+PTS.length+" stations · hourly to "+nHours+"h";
+      "init "+(primary.init_time||"?").replace("T"," ").slice(0,16)+"Z · "+PTS.length+" stations · "+src+" · to "+nHours+"h";
     buildTabs(); buildLegend(); resize(); render(); startParticles();
     document.getElementById("play").onclick=togglePlay;
     document.getElementById("time").oninput=e=>{ t=+e.target.value; render(); };
@@ -222,20 +235,25 @@
     const gw=Math.ceil(W/GS)+1, gh=Math.ceil(H/GS)+1;
     const grid=fieldCanvas(gw,gh);                 // offscreen low-res field
     const gimg=grid.createImageData(gw,gh); const G=gimg.data;
+    // Max influence radius (px): beyond this from the NEAREST station the field fades to
+    // transparent, so sparse/global data (isolated clusters, oceans, gaps) never paints a
+    // solid extrapolated blob. Alpha ramps smoothly from full (near) to 0 (at the radius).
+    const R=90, R2=R*R;
     for(let gy=0; gy<gh; gy++){
       for(let gx=0; gx<gw; gx++){
         const px=gx*GS, py=gy*GS;
-        let sw=0, sv=0;
+        let sw=0, sv=0, nd2=Infinity;
         for(const st of sp){ const dx=px-st.x, dy=py-st.y; const d2=dx*dx+dy*dy+1;
+          if(d2<nd2) nd2=d2;
           const w=1/(d2*d2); sw+=w; sv+=w*st.v; }
         const idx=(gy*gw+gx)*4;
-        if(sw<1e-9){ G[idx+3]=0; continue; }
+        if(sw<1e-9 || nd2>R2){ G[idx+3]=0; continue; }   // no station within R -> transparent
         const val=sv/sw;                           // true IDW weighted mean (bounded to data range)
         const [r,g,b]=colorFor(val);
-        // coverage: distance to nearest station via Σw; near a station -> opaque, far -> fade
-        const cover=Math.sqrt(sw);                 // grows as you approach stations
+        // Alpha from nearest-station distance: opaque up close, linear fade to 0 at radius R.
+        const nearFade=1-Math.sqrt(nd2)/R;         // 1 at a station, 0 at the radius
         G[idx]=r; G[idx+1]=g; G[idx+2]=b;
-        G[idx+3]=Math.max(0, Math.min(170, cover*9000));
+        G[idx+3]=Math.max(0, Math.min(170, 170*nearFade));
       }
     }
     grid.putImageData(gimg,0,0);
@@ -303,7 +321,8 @@
       if(v==null||d==null||isNaN(v)||isNaN(d)) continue;
       const pt=map.latLngToContainerPoint([p.lat,p.lon]);
       const dx=cx-pt.x, dy=cy-pt.y, d2=dx*dx+dy*dy+1;
-      if(d2>60000) continue;
+      if(d2>8100) continue;   // 90px radius — match the IDW field cutoff so particles only
+                              // stream near stations (no dense blob over sparse/global gaps)
       const w=1/(d2); sw+=w;
       const ang=(d+180)*Math.PI/180;
       ux+=w*Math.sin(ang)*v; uy+=w*(-Math.cos(ang))*v;

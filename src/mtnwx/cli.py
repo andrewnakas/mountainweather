@@ -142,10 +142,12 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Cap rows loaded for scoring (keeps verify within memory)")
     p_verify.set_defaults(func=_cmd_verify)
 
-    p_predict = sub.add_parser("predict", help="Forecast from the latest HRRR cycle")
+    p_predict = sub.add_parser("predict", help="Forecast from the latest HRRR (US) or GFS (global) cycle")
+    p_predict.add_argument("--base", choices=["hrrr", "gfs"], default="hrrr",
+                           help="Base model: hrrr=US path, gfs=global path (+ECMWF where present)")
     p_predict.add_argument("--stations", default=None, help="Stations+terrain parquet")
     p_predict.add_argument("--models", default=None, help="Models dir")
-    p_predict.add_argument("--init", default=None, help="HRRR init time (default: latest)")
+    p_predict.add_argument("--init", default=None, help="Init time (default: latest cycle)")
     p_predict.add_argument("--out", default=None, help="Output JSON path")
     p_predict.set_defaults(func=_cmd_predict)
 

@@ -35,6 +35,7 @@ TARGET_UNITS = {
     "wind_speed_ms": "m/s",
     "wind_gust_ms": "m/s",
     "relative_humidity_pct": "%",
+    "precip_1h_mm": "mm/h",
 }
 
 
@@ -79,6 +80,42 @@ def build_forecast_features(stations: pd.DataFrame, init: pd.Timestamp) -> pd.Da
     return df
 
 
+def build_forecast_features_gfs(stations: pd.DataFrame, init: pd.Timestamp | None) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """GLOBAL live path: build the (obs-free) feature table from the latest GFS cycle,
+    optionally augmented with ECMWF AIFS, using the SAME derived-feature functions as the
+    global training table so train/serve features match. Returns (df, init)."""
+    import sys as _sys
+
+    # Reuse the global training-table feature builders (single source of truth).
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    from build_training_table_global import add_gfs_derived  # noqa: E402
+    from mtnwx.data import gfs
+
+    import xarray as xr
+
+    ds = gfs.open_archive()
+    if init is None:
+        init = pd.to_datetime(ds.init_time.values).max()
+    lat_da = xr.DataArray(stations["lat"].to_numpy(), dims="station")
+    lon_da = xr.DataArray(stations["lon"].to_numpy(), dims="station")
+    lead_h_all = (ds.lead_time.values / np.timedelta64(1, "h")).astype("int32")
+    ds = ds.isel(lead_time=np.flatnonzero(lead_h_all <= 48))
+
+    gx = gfs._extract_one_init(ds, init, gfs.GFS_VARS, lat_da, lon_da)
+    gx["station_id"] = stations["station_id"].to_numpy()[gx["station_ix"].to_numpy()]
+    gx = gx.drop(columns="station_ix")
+
+    df = add_gfs_derived(gx)                 # gfs_wind_speed/dir, gfs_precip_mm, valid_time
+    df = add_time_features(df, stations)     # lat/lon + solar + time encodings
+    df = add_terrain_features(df, stations)  # elevation + terrain
+    # Rename gfs_wind_dir_10m -> wind_dir_10m so the viewer's arrow layer finds it.
+    if "gfs_wind_dir_10m" in df.columns and "wind_dir_10m" not in df.columns:
+        df["wind_dir_10m"] = df["gfs_wind_dir_10m"]
+    return df, init
+
+
 def predict_table(df: pd.DataFrame, models: dict, meta: dict) -> pd.DataFrame:
     """Predict point + quantiles for every target; return a long forecast frame."""
     feats = meta["features"]
@@ -103,7 +140,8 @@ def predict_table(df: pd.DataFrame, models: dict, meta: dict) -> pd.DataFrame:
     return out
 
 
-def to_station_json(forecast: pd.DataFrame, stations: pd.DataFrame, models: dict, init: pd.Timestamp) -> dict:
+def to_station_json(forecast: pd.DataFrame, stations: pd.DataFrame, models: dict, init: pd.Timestamp,
+                    generated_from: str = "HRRR via dynamical.org, post-processed by mtnwx") -> dict:
     """Compact JSON: per-station hourly forecast with point + q10/q90 band."""
     meta_st = stations.set_index("station_id")
     features = []
@@ -147,7 +185,7 @@ def to_station_json(forecast: pd.DataFrame, stations: pd.DataFrame, models: dict
         "type": "FeatureCollection",
         "model": "mtnwx",
         "init_time": init.isoformat(),
-        "generated_from": "HRRR via dynamical.org, post-processed by mtnwx",
+        "generated_from": generated_from,
         "features": features,
     }
 
@@ -157,9 +195,12 @@ def _r(v):
 
 
 def main(args: argparse.Namespace) -> int:
-    stations_path = Path(args.stations) if args.stations else data_dir() / "stations_terrain.parquet"
+    base = getattr(args, "base", "hrrr")
+    default_stations = "stations_terrain_global.parquet" if base == "gfs" else "stations_terrain.parquet"
+    stations_path = Path(args.stations) if args.stations else data_dir() / default_stations
     if not stations_path.exists():
-        stations_path = data_dir() / "stations.parquet"
+        alt = "stations_global.parquet" if base == "gfs" else "stations.parquet"
+        stations_path = data_dir() / alt
     stations = pd.read_parquet(stations_path)
     models_dir = Path(args.models) if args.models else data_dir() / "models"
     models, meta = load_models(models_dir)
@@ -167,13 +208,21 @@ def main(args: argparse.Namespace) -> int:
         print(f"ERROR: no models in {models_dir}")
         return 1
 
-    ds = hrrr.open_archive()
-    init = pd.Timestamp(args.init) if args.init else latest_init(ds)
-    print(f"Forecasting from HRRR init {init} for {len(stations)} stations")
+    init_arg = pd.Timestamp(args.init) if args.init else None
+    if base == "gfs":
+        # GLOBAL path: latest GFS cycle (+ ECMWF where present), global models/stations.
+        print(f"Forecasting (GLOBAL/GFS base) for {len(stations)} stations")
+        feats, init = build_forecast_features_gfs(stations, init_arg)
+        gen_from = "GFS (+ECMWF AIFS) via dynamical.org, post-processed by mtnwx (global)"
+    else:
+        ds = hrrr.open_archive()
+        init = init_arg if init_arg is not None else latest_init(ds)
+        print(f"Forecasting from HRRR init {init} for {len(stations)} stations")
+        feats = build_forecast_features(stations, init)
+        gen_from = "HRRR via dynamical.org, post-processed by mtnwx"
 
-    feats = build_forecast_features(stations, init)
     fc = predict_table(feats, models, meta)
-    payload = to_station_json(fc, stations, models, init)
+    payload = to_station_json(fc, stations, models, init, generated_from=gen_from)
 
     out = Path(args.out) if args.out else Path("site") / "forecast.json"
     out.parent.mkdir(parents=True, exist_ok=True)

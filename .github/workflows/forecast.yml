@@ -27,12 +27,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"      # .[gfs] (dynamical-catalog>=0.8) needs 3.12
           cache: pip
       - name: Install
-        run: pip install -e ".[train,terrain]"
+        run: pip install -e ".[train,terrain,gfs]"
 
-      - name: Fetch stations + models from HF
+      - name: Fetch stations + models from HF (US root + global/)
         id: fetch
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -42,38 +42,72 @@ jobs:
           from huggingface_hub import snapshot_download
           from mtnwx.config import load_configs
           hub = load_configs()["hub"]
-          os.makedirs("data/models", exist_ok=True)
-          ready = True
-          # Stations + trained models may not exist yet (before the first backfill+train).
-          # Degrade gracefully so the site still deploys with a "warming up" state.
+          os.makedirs("data/models", exist_ok=True)          # US models (repo root)
+          os.makedirs("data/models_global", exist_ok=True)   # global models (global/ prefix)
+          us_ready = global_ready = False
+          # Inputs may not exist yet (before backfill+train). Degrade gracefully so the
+          # site still deploys with a "warming up" state.
           try:
               st = snapshot_download(repo_id=hub["datasets"]["stations"], repo_type="dataset")
               for f in glob.glob(os.path.join(st, "*.parquet")):
                   shutil.copy(f, "data/")
               md = snapshot_download(repo_id=hub["models"]["repo"], repo_type="model")
-              has_model = False
+              # US models live at the repo root; global models under global/.
               for f in glob.glob(os.path.join(md, "*")):
                   if os.path.isfile(f):
                       shutil.copy(f, "data/models/")
                       if f.endswith(".pkl"):
-                          has_model = True
-              ready = has_model and bool(glob.glob("data/*.parquet"))
+                          us_ready = True
+              gdir = os.path.join(md, "global")
+              if os.path.isdir(gdir):
+                  for f in glob.glob(os.path.join(gdir, "*")):
+                      if os.path.isfile(f):
+                          shutil.copy(f, "data/models_global/")
+                          if f.endswith(".pkl"):
+                              global_ready = True
           except Exception as e:
               print(f"stations/models not available yet: {e}")
-              ready = False
+          have_st = bool(glob.glob("data/*.parquet"))
+          us = us_ready and have_st
+          gl = global_ready and os.path.exists("data/stations_terrain_global.parquet")
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"ready={'1' if ready else '0'}\n")
-          print("forecast inputs ready" if ready else "no models yet — deploying site shell")
+              fh.write(f"us_ready={'1' if us else '0'}\n")
+              fh.write(f"global_ready={'1' if gl else '0'}\n")
+          print(f"US forecast ready: {us} | GLOBAL forecast ready: {gl}")
           PY
 
-      - name: Generate forecast
-        if: steps.fetch.outputs.ready == '1'
-        run: python -m mtnwx.cli predict --out site/forecast.json
+      - name: Generate US forecast (HRRR base)
+        if: steps.fetch.outputs.us_ready == '1'
+        run: python -m mtnwx.cli predict --base hrrr --out site/forecast.json
 
-      - name: Copy scorecard into site (if present)
+      - name: Generate GLOBAL forecast (GFS base +ECMWF)
+        if: steps.fetch.outputs.global_ready == '1'
+        run: |
+          python -m mtnwx.cli predict --base gfs \
+            --stations data/stations_terrain_global.parquet \
+            --models data/models_global \
+            --out site/forecast_global.json
+
+      - name: Copy scorecards into site (if present)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           if [ -f data/verify/scorecard.json ]; then cp data/verify/scorecard.json site/; fi
           if [ -f data/verify/skill_report.md ]; then cp data/verify/skill_report.md site/; fi
+          # Global scorecard lives under global/verify/ in the models repo.
+          python - <<'PY' || true
+          import shutil
+          from huggingface_hub import hf_hub_download
+          from mtnwx.config import load_configs
+          repo = load_configs()["hub"]["models"]["repo"]
+          for name, dst in [("global/verify/scorecard.json", "site/scorecard_global.json"),
+                            ("global/verify/skill_report.md", "site/skill_report_global.md")]:
+              try:
+                  shutil.copy(hf_hub_download(repo, name, repo_type="model"), dst)
+                  print("copied", dst)
+              except Exception as e:
+                  print("skip", name, e)
+          PY
 
       - uses: actions/upload-pages-artifact@v3
         with:
