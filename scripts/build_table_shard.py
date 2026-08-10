@@ -33,12 +33,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", help="Single GFS shard month YYYY-MM")
     ap.add_argument("--months", help="Comma-separated months (loads obs+ECMWF once, loops)")
+    ap.add_argument("--ecmwf-slim-only", action="store_true",
+                    help="Just build+cache the ECMWF slim frame (short job, better survival), then exit")
     args = ap.parse_args()
     hub = load_configs()["hub"]
     dd = data_dir()
     from huggingface_hub import HfApi, hf_hub_download
 
     api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+
+    # Cache-only mode: build the ECMWF slim frame and upload it, nothing else. Once cached,
+    # every table-part dispatch skips the ~4.6 GB ECMWF re-download and finishes fast — so
+    # banking this one cache (in a short, survivable job) unblocks the rest.
+    if args.ecmwf_slim_only:
+        files = set(api.list_repo_files(hub["datasets"]["training"], repo_type="dataset"))
+        ecmwf_names = sorted(f for f in files if f.startswith("ecmwf_global/") and f.endswith(".parquet"))
+        load_ecmwf(hub["datasets"]["training"], ecmwf_names, hub=hub)
+        print("ECMWF slim cache built (or already present)", flush=True)
+        return 0
 
     months = []
     if args.months:
