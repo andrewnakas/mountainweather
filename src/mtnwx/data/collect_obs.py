@@ -37,6 +37,9 @@ def _fetch_one(row: pd.Series, start: date, end: date, token: str | None) -> pd.
             if not net:
                 return obs._empty()
             return obs.fetch_iem_hourly(sid[4:], str(net), start, end)
+        if sid.startswith("MS:"):
+            from mtnwx.data.meteostat import fetch_meteostat_hourly
+            return fetch_meteostat_hourly(sid[3:], start, end)
         # Default: a bare SNOTEL triplet like "308:AZ:SNTL".
         if sid.endswith(":SNTL") or sid.count(":") == 2:
             return obs.fetch_snotel_hourly(sid, start, end)

@@ -23,7 +23,7 @@ regions:
     description: Worldwide surface stations + global NWP (GFS/ECMWF blend, HRRR over US)
     bounds: { lon_min: -180.0, lon_max: 180.0, lat_min: -75.0, lat_max: 80.0 }
     station_filter: { min_elevation_m: -100, min_local_relief_m: 0, relief_radius_km: 10.0 }
-    networks: [ASOS, IEM]        # ASOS (dynamical, US-dense) + IEM (worldwide METAR, ~4k non-US)
+    networks: [ASOS, IEM, METEOSTAT]  # ASOS+IEM (METAR) + Meteostat (~22k global raw density)
 
 # Backwards-compat: legacy top-level keys mirror the active region so existing code that
 # reads cfg['region']['bounds'] / ['station_filter'] keeps working.

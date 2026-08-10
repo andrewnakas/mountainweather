@@ -204,7 +204,9 @@ def main() -> int:
             obs = None
     if obs is None:
         print(f"collecting global obs {start}..{end} for {len(stations)} stations...")
-        obs = collect(stations, start, end)
+        # 24 workers: at ~26k stations the per-station Meteostat/IEM HTTP fetch is the
+        # slowest stage; more concurrency keeps the obs collection tractable in CI.
+        obs = collect(stations, start, end, workers=24)
         for c in obs.select_dtypes("float64").columns:
             obs[c] = obs[c].astype("float32")
         if not args.no_obs_cache:

@@ -181,6 +181,18 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
         except Exception as exc:  # noqa: BLE001 — IEM is additive
             print(f"WARN: IEM fetch failed ({exc}); continuing without it")
 
+    # Meteostat — global raw-density (~22k stations worldwide, key-free bulk). Not
+    # US-skewed (EMEA ~9k, Asia ~6k). Additive; obs via meteostat.fetch_meteostat_hourly.
+    if "METEOSTAT" in nets:
+        try:
+            from mtnwx.data.meteostat import select_stations as ms_select
+
+            ms = ms_select(region["bounds"])
+            rows += ms.to_dict("records")
+            print(f"NOTE: added {len(ms)} Meteostat stations")
+        except Exception as exc:  # noqa: BLE001 — Meteostat is additive
+            print(f"WARN: Meteostat fetch failed ({exc}); continuing without it")
+
     token = os.environ.get("SYNOPTIC_API_TOKEN")
     if "SYNOPTIC" in nets and token:
         try:
