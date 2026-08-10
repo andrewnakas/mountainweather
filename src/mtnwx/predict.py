@@ -141,53 +141,61 @@ def predict_table(df: pd.DataFrame, models: dict, meta: dict) -> pd.DataFrame:
 
 
 def to_station_json(forecast: pd.DataFrame, stations: pd.DataFrame, models: dict, init: pd.Timestamp,
-                    generated_from: str = "HRRR via dynamical.org, post-processed by mtnwx") -> dict:
-    """Compact JSON: per-station hourly forecast with point + q10/q90 band."""
+                    generated_from: str = "HRRR via dynamical.org, post-processed by mtnwx",
+                    lean: bool = False) -> dict:
+    """Per-station hourly forecast JSON.
+
+    ``lean=True`` emits a viewer-optimized payload: point values only (no q10/q90 bands or
+    per-var units — the map never reads them), and a single top-level ``valid_times`` shared
+    by all features (they're identical hourly sequences). This shrinks the file ~5-6x, which
+    at 26k stations is the difference between a 166 MB unusable download and a ~30 MB one."""
     meta_st = stations.set_index("station_id")
     features = []
+    shared_times = None
     for sid, g in forecast.groupby("station_id"):
         g = g.sort_values("lead_hour")
         s = meta_st.loc[sid] if sid in meta_st.index else None
+        if lean and shared_times is None:
+            shared_times = [t.isoformat() for t in g["valid_time"]]
         series = {}
         for target in models:
-            entry = {
-                "point": [_r(v) for v in g.get(target, pd.Series([np.nan] * len(g)))],
-            }
-            if f"{target}_q10" in g and f"{target}_q90" in g:
-                entry["q10"] = [_r(v) for v in g[f"{target}_q10"]]
-                entry["q90"] = [_r(v) for v in g[f"{target}_q90"]]
-            entry["units"] = TARGET_UNITS.get(target, "")
+            entry = {"point": [_r(v) for v in g.get(target, pd.Series([np.nan] * len(g)))]}
+            if not lean:
+                if f"{target}_q10" in g and f"{target}_q90" in g:
+                    entry["q10"] = [_r(v) for v in g[f"{target}_q10"]]
+                    entry["q90"] = [_r(v) for v in g[f"{target}_q90"]]
+                entry["units"] = TARGET_UNITS.get(target, "")
             series[target] = entry
-        # Wind direction (deg from N, HRRR-derived) — not a corrected target but needed
-        # to draw the wind field over the land. Carried through from build_forecast_features.
+        # Wind direction (deg from N) — needed to draw the wind field/arrows.
         if "wind_dir_10m" in g.columns:
-            series["wind_dir_deg"] = {
-                "point": [_r(v) for v in g["wind_dir_10m"]],
-                "units": "deg",
-            }
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [float(s["lon"]), float(s["lat"])] if s is not None else [None, None],
-                },
-                "properties": {
-                    "station_id": sid,
-                    "name": (s["name"] if s is not None and "name" in s else sid),
-                    "elevation_m": (float(s["elevation_m"]) if s is not None else None),
-                    "valid_times": [t.isoformat() for t in g["valid_time"]],
-                    "forecast": series,
-                },
-            }
-        )
-    return {
+            wd = {"point": [_r(v) for v in g["wind_dir_10m"]]}
+            if not lean:
+                wd["units"] = "deg"
+            series["wind_dir_deg"] = wd
+        props = {
+            "station_id": sid,
+            "name": (s["name"] if s is not None and "name" in s else sid),
+            "elevation_m": (round(float(s["elevation_m"]), 1) if s is not None and pd.notna(s["elevation_m"]) else None),
+            "forecast": series,
+        }
+        if not lean:  # in lean mode valid_times is shared at the top level
+            props["valid_times"] = [t.isoformat() for t in g["valid_time"]]
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point",
+                         "coordinates": [round(float(s["lon"]), 4), round(float(s["lat"]), 4)] if s is not None else [None, None]},
+            "properties": props,
+        })
+    out = {
         "type": "FeatureCollection",
         "model": "mtnwx",
         "init_time": init.isoformat(),
         "generated_from": generated_from,
         "features": features,
     }
+    if lean and shared_times is not None:
+        out["valid_times"] = shared_times  # shared by all features (identical hourly seq)
+    return out
 
 
 def _r(v):
@@ -209,9 +217,15 @@ def main(args: argparse.Namespace) -> int:
         return 1
 
     init_arg = pd.Timestamp(args.init) if args.init else None
+    lean = base == "gfs"
     if base == "gfs":
         # GLOBAL path: latest GFS cycle (+ ECMWF where present), global models/stations.
-        print(f"Forecasting (GLOBAL/GFS base) for {len(stations)} stations")
+        # Thin to a ~1° spatial grid: the full 26k stations make the viewer's IDW field +
+        # particles lag badly and blow the JSON to 166 MB. One station per ~1° cell keeps a
+        # smooth global field (~8.9k stations, ~12 MB) — the map interpolates either way, and
+        # the full 26k is still used for training/verification, just not the live map.
+        stations = _thin_spatial(stations, cell_deg=1.0)
+        print(f"Forecasting (GLOBAL/GFS base) for {len(stations)} thinned stations")
         feats, init = build_forecast_features_gfs(stations, init_arg)
         gen_from = "GFS (+ECMWF AIFS) via dynamical.org, post-processed by mtnwx (global)"
     else:
@@ -222,10 +236,23 @@ def main(args: argparse.Namespace) -> int:
         gen_from = "HRRR via dynamical.org, post-processed by mtnwx"
 
     fc = predict_table(feats, models, meta)
-    payload = to_station_json(fc, stations, models, init, generated_from=gen_from)
+    payload = to_station_json(fc, stations, models, init, generated_from=gen_from, lean=lean)
 
     out = Path(args.out) if args.out else Path("site") / "forecast.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload))
-    print(f"Wrote forecast for {len(payload['features'])} stations -> {out}")
+    sz = out.stat().st_size / 1e6
+    print(f"Wrote forecast for {len(payload['features'])} stations -> {out} ({sz:.1f} MB)")
     return 0
+
+
+def _thin_spatial(stations: pd.DataFrame, cell_deg: float = 0.4) -> pd.DataFrame:
+    """Keep at most one station per (lat,lon) grid cell — spatial thinning that preserves
+    global coverage while cutting dense clusters. Prefers the lowest-elevation (airport-
+    like) station per cell for stable obs, deterministic (sorted)."""
+    df = stations.copy()
+    df["_cy"] = (df["lat"] / cell_deg).round().astype(int)
+    df["_cx"] = (df["lon"] / cell_deg).round().astype(int)
+    df = df.sort_values(["_cy", "_cx", "elevation_m", "station_id"])
+    df = df.drop_duplicates(["_cy", "_cx"], keep="first")
+    return df.drop(columns=["_cy", "_cx"]).reset_index(drop=True)

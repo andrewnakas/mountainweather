@@ -105,7 +105,7 @@
   };
   const ORDER = ["wind_speed_ms","wind_gust_ms","air_temp_c","relative_humidity_pct","precip_1h_mm"];
 
-  let DATA=null, PTS=[], activeVar="wind_speed_ms", t=0, nHours=48, playing=false, timer=null;
+  let DATA=null, PTS=[], VALID_TIMES=[], activeVar="wind_speed_ms", t=0, nHours=48, playing=false, timer=null;
 
   //---------------------------------------------------------------- map
   const map = L.map("map", { zoomControl:true, preferCanvas:true, worldCopyJump:true })
@@ -157,8 +157,11 @@
     (gl?.features||[]).forEach(f=>byId.set(f.properties.station_id, f));
     (us?.features||[]).forEach(f=>byId.set(f.properties.station_id, f));
     const feats = [...byId.values()];
-    const anyT = feats.find(f=>f.properties.valid_times);
-    nHours = Math.min(48, (anyT?.properties.valid_times||[]).length || 48);
+    // valid_times: lean payloads share ONE array at the top level; legacy ones put it per
+    // feature. Prefer top-level (global then US), fall back to any feature's.
+    VALID_TIMES = gl?.valid_times || us?.valid_times
+      || feats.find(f=>f.properties.valid_times)?.properties.valid_times || [];
+    nHours = Math.min(48, VALID_TIMES.length || 48);
     document.getElementById("time").max = nHours-1;
     // Precompute station point list with per-hour arrays.
     PTS = feats.filter(f=>f.geometry.coordinates[0]!=null).map(f=>{
@@ -304,7 +307,7 @@
   }
   function drawTime(){
     if(!DATA) return;
-    const vt=(DATA.features.find(f=>f.properties.valid_times)?.properties.valid_times||[])[t];
+    const vt=VALID_TIMES[t];
     document.getElementById("timelabel").textContent = vt ? vt.replace("T"," ").slice(5,16)+"Z" : ("+"+t+"h");
   }
 
