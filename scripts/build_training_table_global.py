@@ -93,15 +93,35 @@ def add_ecmwf_derived(ec: pd.DataFrame) -> pd.DataFrame:
     return out[keep]
 
 
-def load_ecmwf(repo: str, ecmwf_names: list[str]) -> pd.DataFrame | None:
-    """Stream-download each ECMWF-global shard, derive its slim (station_id, valid_time,
-    ecmwf_*) frame, and delete the shard before the next — so the ~6 GB of ECMWF shards
-    never all sit on disk at once. Returns one deduped frame, or None if no shards yet
-    (the global model then trains GFS-only, unchanged)."""
+def _ecmwf_slim_key(ecmwf_names: list[str]) -> str:
+    """Cache key for the derived ECMWF slim frame — hash of the shard set so it invalidates
+    when shards change (e.g. the 4k->26k re-extraction)."""
+    h = hashlib.md5("|".join(sorted(ecmwf_names)).encode()).hexdigest()[:8]
+    return f"ecmwf_slim/ecmwf_slim_{len(ecmwf_names)}_{h}.parquet"
+
+
+def load_ecmwf(repo: str, ecmwf_names: list[str], hub: dict | None = None) -> pd.DataFrame | None:
+    """Return the deduped slim (station_id, valid_time, ecmwf_*) frame. Prefer a cached
+    slim parquet on HF (fast, ~one small file); else build it by streaming+deriving each
+    shard, and upload the cache. This avoids re-downloading ~4.6 GB of ECMWF shards on
+    every table-part dispatch. None if no shards yet (global model trains GFS-only)."""
     if not ecmwf_names:
         print("no ECMWF-global shards yet — training GFS-only (ECMWF is additive)")
         return None
     from huggingface_hub import hf_hub_download
+
+    slim_key = _ecmwf_slim_key(ecmwf_names)
+    # Fast path: load the cached slim frame.
+    if hub is not None:
+        try:
+            sp = hf_hub_download(hub["datasets"]["training"], slim_key, repo_type="dataset")
+            ec = pd.read_parquet(sp)
+            ec["valid_time"] = pd.to_datetime(ec["valid_time"])
+            ec["station_id"] = ec["station_id"].astype("category")
+            print(f"ECMWF: loaded cached slim ({len(ec)} rows) {slim_key}", flush=True)
+            return ec
+        except Exception:
+            pass  # not cached yet — build below
 
     frames = []
     for name in ecmwf_names:
@@ -117,13 +137,22 @@ def load_ecmwf(repo: str, ecmwf_names: list[str]) -> pd.DataFrame | None:
     # A station/valid_time can recur across overlapping inits; keep the latest-init row
     # (already ordered by shard/init) — drop dup keys to keep the merge one-to-one.
     ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
-    # This frame stays resident across every GFS-shard join; at 26k stations the object
-    # station_id column dominates memory (~6 GB). Category-encode it: the ~26k unique ids
-    # become small int codes, cutting the resident frame several-fold (avoids the OOM).
+    print(f"ECMWF: {len(ec)} rows from {len(ecmwf_names)} shards", flush=True)
+
+    # Cache the slim frame for subsequent dispatches (upload BEFORE category-encoding so the
+    # parquet keeps a plain string station_id).
+    if hub is not None:
+        try:
+            from mtnwx.data.hub_io import upload_file
+            tmp = data_dir() / "ecmwf_slim.parquet"
+            ec.to_parquet(tmp, index=False, compression="zstd")
+            upload_file(tmp, slim_key, hub["datasets"]["training"], repo_type="dataset")
+            print(f"cached ECMWF slim -> {slim_key}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN: ECMWF slim cache upload failed ({e})")
+
+    # Category-encode station_id for the resident-frame memory win (see 26k OOM note).
     ec["station_id"] = ec["station_id"].astype("category")
-    mem = ec.memory_usage(deep=True).sum() / 1e9
-    print(f"ECMWF: {len(ec)} rows from {len(ecmwf_names)} shards ({mem:.1f} GB resident), "
-          f"cols {[c for c in ec.columns if c.startswith('ecmwf_')]}", flush=True)
     return ec
 
 
@@ -330,7 +359,7 @@ def main() -> int:
     del obs
 
     # Load ECMWF (AIFS) predictors once, if present. Additive: absent => GFS-only.
-    ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names)
+    ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names, hub=hub)
 
     for old in out.glob("part-*.parquet"):
         old.unlink()

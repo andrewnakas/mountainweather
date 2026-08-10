@@ -82,7 +82,7 @@ def main() -> int:
     obs_slim = prepare_obs(obs)
     del obs
     ecmwf_names = sorted(f for f in files if f.startswith("ecmwf_global/") and f.endswith(".parquet"))
-    ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names)
+    ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names, hub=hub)
 
     from mtnwx.data.hub_io import upload_file
     for m in todo:
