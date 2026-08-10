@@ -207,13 +207,38 @@ def main() -> int:
     start = pd.Timestamp("2024-01-01").date()
     end = pd.Timestamp("2025-12-31").date()
     print(f"shard window {shard_start}..{shard_end}; obs cache window {start}..{end}")
+    # Sort so the hash + any batch slicing match the collector's ordering exactly.
+    stations = stations.sort_values("station_id").reset_index(drop=True)
     sid_hash = hashlib.md5("|".join(sorted(stations["station_id"].astype(str))).encode()).hexdigest()[:8]
     obs_key = f"obs/obsG_{start}_{end}_n{len(stations)}_{sid_hash}.parquet"
+    parts_folder = f"obs_parts/obsG_{start}_{end}_n{len(stations)}_{sid_hash}"
     obs = None
-    if not args.no_obs_cache:
+
+    # Preferred at 26k scale: assemble obs from the resumable BATCH parts written by
+    # collect_obs_batch.py (inline collection of 26k stations runs >90 min and gets
+    # reclaimed mid-run, losing everything). Read only the join columns from each part.
+    if not args.no_obs_cache and obs is None:
         try:
-            # Read ONLY the join columns from the 491 MB parquet — loading all columns
-            # of the ~50M-row frame is what pushed the 7 GB runner into OOM (exit 143).
+            from huggingface_hub import HfApi
+            api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+            files = api.list_repo_files(hub["datasets"]["verify"], repo_type="dataset")
+            part_names = sorted(f for f in files if f.startswith(parts_folder + "/") and f.endswith(".parquet"))
+            if part_names:
+                frames = []
+                for pn in part_names:
+                    pp = hf_hub_download(hub["datasets"]["verify"], pn, repo_type="dataset")
+                    frames.append(pd.read_parquet(pp, columns=[c for c in OBS_JOIN_COLS]))
+                obs = pd.concat(frames, ignore_index=True)
+                del frames
+                print(f"loaded global obs from {len(part_names)} batch parts ({len(obs)} rows)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"WARN: batch-parts load failed ({e}); trying single-file cache")
+            obs = None
+
+    if not args.no_obs_cache and obs is None:
+        try:
+            # Read ONLY the join columns from the parquet — loading all columns of the
+            # multi-M-row frame is what pushed the 7 GB runner into OOM (exit 143).
             obs_path = hf_hub_download(hub["datasets"]["verify"], obs_key, repo_type="dataset")
             obs = pd.read_parquet(obs_path, columns=[c for c in OBS_JOIN_COLS])
             print(f"loaded cached global obs ({len(obs)} rows, {len(obs.columns)} cols)")

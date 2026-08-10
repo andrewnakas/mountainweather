@@ -1,0 +1,47 @@
+name: Collect global obs (batched, resumable)
+
+# Collect hourly obs for the ~26k global stations in BATCHES. Inline collection in the
+# training job runs >90 min and gets reclaimed mid-run (losing everything); splitting into
+# 12 short batches (~2k stations each, ~8-12 min) makes it resumable and survivable. Each
+# batch uploads a part under obs_parts/<window+hash>/ with skip-if-exists; the training
+# builder assembles the parts as the obs cache. Run once after a catalogue change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: "Max concurrent batch jobs"
+        default: "6"
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        batch: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    env:
+      MTNWX_REGION: global
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train]"
+
+      - name: Require HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: '[ -n "$HF_TOKEN" ] || { echo "::error::HF_TOKEN empty"; exit 1; }'
+
+      - name: Collect obs batch
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/collect_obs_batch.py --batch ${{ matrix.batch }} --nbatches 12
