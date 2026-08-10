@@ -169,6 +169,18 @@ def build_catalogue(limit: int | None = None) -> pd.DataFrame:
         except Exception as exc:  # noqa: BLE001 — ASOS is additive
             print(f"WARN: ASOS fetch failed ({exc}); continuing without it")
 
+    # IEM worldwide METAR/ASOS — the ~4,000 non-US airports the dynamical asos-parquet
+    # lacks (dense Europe/Asia). Additive; obs come from obs.fetch_iem_hourly.
+    if "IEM" in nets:
+        try:
+            from mtnwx.data.iem import select_stations as iem_select
+
+            iem = iem_select(region["bounds"])
+            rows += iem.to_dict("records")
+            print(f"NOTE: added {len(iem)} IEM (global METAR) stations")
+        except Exception as exc:  # noqa: BLE001 — IEM is additive
+            print(f"WARN: IEM fetch failed ({exc}); continuing without it")
+
     token = os.environ.get("SYNOPTIC_API_TOKEN")
     if "SYNOPTIC" in nets and token:
         try:
