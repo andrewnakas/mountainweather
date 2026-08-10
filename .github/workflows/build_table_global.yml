@@ -9,45 +9,20 @@ name: Build global training table (batched, resumable)
 on:
   workflow_dispatch:
     inputs:
-      max_parallel:
-        description: "Max concurrent month jobs"
-        default: "5"
+      months:
+        description: "Comma-separated months to build (blank = all 2024-01..2025-12)"
+        default: ""
 
 permissions:
   contents: read
 
+# GitHub's fair-use policy reclaims large-matrix jobs aggressively (a 24-way matrix gets
+# killed at ~3 min), while SINGLE jobs survive for 45+ min. So build all months inside ONE
+# job, sequentially — each month is a short join + upload with skip-if-exists, and the one
+# job persists long enough to grind through several months per run. Re-dispatch to resume.
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
-      matrix:
-        month:
-          - "2024-01"
-          - "2024-02"
-          - "2024-03"
-          - "2024-04"
-          - "2024-05"
-          - "2024-06"
-          - "2024-07"
-          - "2024-08"
-          - "2024-09"
-          - "2024-10"
-          - "2024-11"
-          - "2024-12"
-          - "2025-01"
-          - "2025-02"
-          - "2025-03"
-          - "2025-04"
-          - "2025-05"
-          - "2025-06"
-          - "2025-07"
-          - "2025-08"
-          - "2025-09"
-          - "2025-10"
-          - "2025-11"
-          - "2025-12"
     env:
       MTNWX_REGION: global
       PYTHONUNBUFFERED: "1"
@@ -68,7 +43,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: '[ -n "$HF_TOKEN" ] || { echo "::error::HF_TOKEN empty"; exit 1; }'
 
-      - name: Build table part for month
+      - name: Build table parts (single job, obs+ECMWF loaded once, resumable)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python scripts/build_table_shard.py --month ${{ matrix.month }}
+        run: |
+          MONTHS="${{ github.event.inputs.months }}"
+          if [ -z "$MONTHS" ]; then
+            MONTHS="2024-01,2024-02,2024-03,2024-04,2024-05,2024-06,2024-07,2024-08,2024-09,2024-10,2024-11,2024-12,2025-01,2025-02,2025-03,2025-04,2025-05,2025-06,2025-07,2025-08,2025-09,2025-10,2025-11,2025-12"
+          fi
+          python scripts/build_table_shard.py --months "$MONTHS"
