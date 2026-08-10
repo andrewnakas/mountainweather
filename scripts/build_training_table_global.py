@@ -117,7 +117,13 @@ def load_ecmwf(repo: str, ecmwf_names: list[str]) -> pd.DataFrame | None:
     # A station/valid_time can recur across overlapping inits; keep the latest-init row
     # (already ordered by shard/init) — drop dup keys to keep the merge one-to-one.
     ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
-    print(f"ECMWF: {len(ec)} rows from {len(ecmwf_names)} shards, cols {[c for c in ec.columns if c.startswith('ecmwf_')]}", flush=True)
+    # This frame stays resident across every GFS-shard join; at 26k stations the object
+    # station_id column dominates memory (~6 GB). Category-encode it: the ~26k unique ids
+    # become small int codes, cutting the resident frame several-fold (avoids the OOM).
+    ec["station_id"] = ec["station_id"].astype("category")
+    mem = ec.memory_usage(deep=True).sum() / 1e9
+    print(f"ECMWF: {len(ec)} rows from {len(ecmwf_names)} shards ({mem:.1f} GB resident), "
+          f"cols {[c for c in ec.columns if c.startswith('ecmwf_')]}", flush=True)
     return ec
 
 
