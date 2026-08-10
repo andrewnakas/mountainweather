@@ -91,13 +91,24 @@ jobs:
           from mtnwx.config import load_configs
           repo = load_configs()["hub"]["datasets"]["training"]
           api = HfApi(token=os.environ.get("HF_TOKEN") or None)
-          try: files = set(api.list_repo_files(repo, repo_type="dataset"))
-          except Exception: files = set()
           target = f"ecmwf_global/ecmwf_${{ matrix.month }}.parquet"
           force = "${{ github.event.inputs.force }}" == "true"
-          exists = (target in files) and not force   # force -> re-extract & overwrite
+          # Size-aware skip: a shard from the OLD 4k catalogue is ~45 MB; a 26k-station
+          # shard is >150 MB. Treat an undersized shard as "needs re-extraction" so a
+          # non-force run upgrades stale months without re-doing the correct large ones.
+          size = 0
+          try:
+              info = api.repo_info(repo, repo_type="dataset", files_metadata=True)
+              for f in info.siblings:
+                  if f.rfilename == target:
+                      size = f.size or 0
+          except Exception:
+              pass
+          fresh = size > 150_000_000            # already a 26k-station shard
+          exists = fresh and not force          # force -> always re-extract
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"exists={'1' if exists else '0'}\n")
+          print(f"{target}: size={size/1e6:.0f}MB fresh={fresh} -> skip={exists}")
           PY
 
       - name: Extract ECMWF month (global stations)

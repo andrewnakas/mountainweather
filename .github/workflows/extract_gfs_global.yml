@@ -93,13 +93,22 @@ jobs:
           from mtnwx.config import load_configs
           repo = load_configs()["hub"]["datasets"]["training"]
           api = HfApi(token=os.environ.get("HF_TOKEN") or None)
-          try: files = set(api.list_repo_files(repo, repo_type="dataset"))
-          except Exception: files = set()
           target = f"gfs_global/gfs_${{ matrix.month }}.parquet"
           force = "${{ github.event.inputs.force }}" == "true"
-          exists = (target in files) and not force   # force -> re-extract & overwrite
+          # Size-aware skip: old 4k shard ~55 MB, 26k shard >150 MB. Re-extract undersized.
+          size = 0
+          try:
+              info = api.repo_info(repo, repo_type="dataset", files_metadata=True)
+              for f in info.siblings:
+                  if f.rfilename == target:
+                      size = f.size or 0
+          except Exception:
+              pass
+          fresh = size > 150_000_000
+          exists = fresh and not force
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"exists={'1' if exists else '0'}\n")
+          print(f"{target}: size={size/1e6:.0f}MB fresh={fresh} -> skip={exists}")
           PY
 
       - name: Extract GFS month (global stations)
