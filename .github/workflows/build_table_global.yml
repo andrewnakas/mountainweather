@@ -1,0 +1,74 @@
+name: Build global training table (batched, resumable)
+
+# Build the 26k training table ONE GFS-month at a time and upload each as a table part
+# (resumable, skip-if-exists). The monolithic in-job join downloads ~7 GB shards + 1.9 GB
+# obs and runs >48 min — longer than a fair-use runner survives, so it never finishes.
+# Each month here is a short (~5-10 min) survivable job. The training job then just loads
+# the finished table_parts (no joining). Run after obs collection + shard extraction.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: "Max concurrent month jobs"
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(github.event.inputs.max_parallel) }}
+      matrix:
+        month:
+          - "2024-01"
+          - "2024-02"
+          - "2024-03"
+          - "2024-04"
+          - "2024-05"
+          - "2024-06"
+          - "2024-07"
+          - "2024-08"
+          - "2024-09"
+          - "2024-10"
+          - "2024-11"
+          - "2024-12"
+          - "2025-01"
+          - "2025-02"
+          - "2025-03"
+          - "2025-04"
+          - "2025-05"
+          - "2025-06"
+          - "2025-07"
+          - "2025-08"
+          - "2025-09"
+          - "2025-10"
+          - "2025-11"
+          - "2025-12"
+    env:
+      MTNWX_REGION: global
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[train]"
+
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+
+      - name: Require HF_TOKEN
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: '[ -n "$HF_TOKEN" ] || { echo "::error::HF_TOKEN empty"; exit 1; }'
+
+      - name: Build table part for month
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/build_table_shard.py --month ${{ matrix.month }}

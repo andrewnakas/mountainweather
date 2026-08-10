@@ -139,6 +139,44 @@ def add_terrain(df: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
 OBS_JOIN_COLS = ["station_id", "valid_time", "air_temp_c", "relative_humidity_pct",
                  "wind_speed_ms", "wind_gust_ms", "dewpoint_c", "precip_1h_mm"]
 
+# The pinned full-MVP obs window (station-set independent; see the note at the cache-key
+# computation). Kept module-level so the shard/table part builders derive identical keys.
+OBS_START = "2024-01-01"
+OBS_END = "2025-12-31"
+
+
+def _sid_hash(stations: pd.DataFrame) -> str:
+    return hashlib.md5("|".join(sorted(stations["station_id"].astype(str))).encode()).hexdigest()[:8]
+
+
+def obs_parts_prefix(stations: pd.DataFrame) -> str:
+    return f"obs_parts/obsG_{OBS_START}_{OBS_END}_n{len(stations)}_{_sid_hash(stations)}"
+
+
+def table_parts_prefix(stations: pd.DataFrame) -> str:
+    return f"table_parts/tblG_{OBS_START}_{OBS_END}_n{len(stations)}_{_sid_hash(stations)}"
+
+
+def assemble_obs_from_parts(hub: dict, stations: pd.DataFrame) -> pd.DataFrame | None:
+    """Load the obs cache from the resumable batch parts (join cols only). None if absent."""
+    from huggingface_hub import HfApi, hf_hub_download
+    prefix = obs_parts_prefix(stations)
+    api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+    try:
+        files = api.list_repo_files(hub["datasets"]["verify"], repo_type="dataset")
+    except Exception:
+        return None
+    part_names = sorted(f for f in files if f.startswith(prefix + "/") and f.endswith(".parquet"))
+    if not part_names:
+        return None
+    frames = []
+    for pn in part_names:
+        pp = hf_hub_download(hub["datasets"]["verify"], pn, repo_type="dataset")
+        frames.append(pd.read_parquet(pp, columns=[c for c in OBS_JOIN_COLS]))
+    obs = pd.concat(frames, ignore_index=True)
+    print(f"loaded global obs from {len(part_names)} batch parts ({len(obs)} rows)", flush=True)
+    return obs
+
 
 def prepare_obs(obs: pd.DataFrame) -> pd.DataFrame:
     """Trim obs to the join columns once, datetime-parsed, so the per-shard merge
@@ -179,15 +217,42 @@ def main() -> int:
         stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], st_name, repo_type="dataset"))
     except Exception:
         stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], "stations_global.parquet", repo_type="dataset"))
+    stations = stations.sort_values("station_id").reset_index(drop=True)
     print(f"global stations: {len(stations)}")
 
-    # STREAM shards, don't snapshot them all. At 26k stations each GFS shard is ~300 MB
-    # (~7 GB total) and ECMWF ~300 MB (~6 GB) — a full snapshot_download would blow the
-    # runner's ~14 GB disk. Instead list shard names via the API and hf_hub_download each
-    # inside the loop, deleting it after the join (see below). Only the shard list here.
-    from huggingface_hub import HfApi
+    out = Path(args.out) if args.out else dd / "training_table_global"
+    out.mkdir(parents=True, exist_ok=True)
 
+    # FAST PATH: if the resumable table_parts (fully-joined per-month tables built by
+    # build_table_shard.py / build_table_global.yml) exist, just download them — no obs
+    # load, no shard downloads, no joins. The monolithic in-job join of ~7 GB shards +
+    # 1.9 GB obs runs >48 min and gets reclaimed before finishing; the pre-built parts
+    # make this step a quick download.
+    from huggingface_hub import HfApi
     api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+    if not args.no_obs_cache:
+        try:
+            tprefix = table_parts_prefix(stations)
+            tfiles = sorted(f for f in api.list_repo_files(hub["datasets"]["training"], repo_type="dataset")
+                            if f.startswith(tprefix + "/") and f.endswith(".parquet"))
+            if tfiles:
+                for old in out.glob("part-*.parquet"):
+                    old.unlink()
+                total = 0
+                for i, tf in enumerate(tfiles, 1):
+                    tp = hf_hub_download(hub["datasets"]["training"], tf, repo_type="dataset")
+                    df = pd.read_parquet(tp)
+                    df.to_parquet(out / f"part-{i:03d}.parquet", index=False)
+                    total += len(df)
+                    del df
+                print(f"FAST PATH: loaded {len(tfiles)} prebuilt table parts ({total} rows) -> {out}/", flush=True)
+                return 0
+        except Exception as e:  # noqa: BLE001
+            print(f"table_parts fast path unavailable ({e}); building inline")
+
+    # INLINE fallback (no prebuilt table_parts). STREAM shards, don't snapshot them all.
+    # At 26k this runs >48 min and may be reclaimed — prefer the table_parts fast path
+    # above (built by build_table_global.yml). Only the shard list here.
     all_files = api.list_repo_files(hub["datasets"]["training"], repo_type="dataset")
     gfs_names = sorted(f for f in all_files if f.startswith("gfs_global/") and f.endswith(".parquet"))
     ecmwf_names = sorted(f for f in all_files if f.startswith("ecmwf_global/") and f.endswith(".parquet"))
@@ -267,12 +332,9 @@ def main() -> int:
     # Load ECMWF (AIFS) predictors once, if present. Additive: absent => GFS-only.
     ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names)
 
-    out = Path(args.out) if args.out else dd / "training_table_global"
-    out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("part-*.parquet"):
         old.unlink()
     total = written = 0
-    from huggingface_hub import hf_hub_download
 
     n = len(gfs_names)
     for i, name in enumerate(gfs_names, 1):
