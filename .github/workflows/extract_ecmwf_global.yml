@@ -12,6 +12,9 @@ on:
       max_parallel:
         description: "Max concurrent extraction jobs"
         default: "10"
+      force:
+        description: "Re-extract even if the shard exists (set true after a station-set change)"
+        default: "false"
 
 permissions:
   contents: read
@@ -91,8 +94,10 @@ jobs:
           try: files = set(api.list_repo_files(repo, repo_type="dataset"))
           except Exception: files = set()
           target = f"ecmwf_global/ecmwf_${{ matrix.month }}.parquet"
+          force = "${{ github.event.inputs.force }}" == "true"
+          exists = (target in files) and not force   # force -> re-extract & overwrite
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"exists={'1' if target in files else '0'}\n")
+              fh.write(f"exists={'1' if exists else '0'}\n")
           PY
 
       - name: Extract ECMWF month (global stations)
