@@ -93,21 +93,31 @@ def add_ecmwf_derived(ec: pd.DataFrame) -> pd.DataFrame:
     return out[keep]
 
 
-def load_ecmwf(shard_dir: str) -> pd.DataFrame | None:
-    """Load + derive all ECMWF-global shards into one slim (station_id, valid_time, ecmwf_*)
-    frame for the per-shard merge. Returns None if no ECMWF shards are present yet (the
-    global model then trains GFS-only, unchanged)."""
-    ec_shards = sorted(glob.glob(f"{shard_dir}/ecmwf_global/ecmwf_*.parquet"))
-    if not ec_shards:
+def load_ecmwf(repo: str, ecmwf_names: list[str]) -> pd.DataFrame | None:
+    """Stream-download each ECMWF-global shard, derive its slim (station_id, valid_time,
+    ecmwf_*) frame, and delete the shard before the next — so the ~6 GB of ECMWF shards
+    never all sit on disk at once. Returns one deduped frame, or None if no shards yet
+    (the global model then trains GFS-only, unchanged)."""
+    if not ecmwf_names:
         print("no ECMWF-global shards yet — training GFS-only (ECMWF is additive)")
         return None
-    frames = [add_ecmwf_derived(pd.read_parquet(s)) for s in ec_shards]
+    from huggingface_hub import hf_hub_download
+
+    frames = []
+    for name in ecmwf_names:
+        p = hf_hub_download(repo, name, repo_type="dataset")
+        frames.append(add_ecmwf_derived(pd.read_parquet(p)))
+        try:
+            os.remove(p)  # free the ~300 MB shard immediately
+        except OSError:
+            pass
     ec = pd.concat(frames, ignore_index=True)
+    del frames
     ec["valid_time"] = pd.to_datetime(ec["valid_time"])
     # A station/valid_time can recur across overlapping inits; keep the latest-init row
     # (already ordered by shard/init) — drop dup keys to keep the merge one-to-one.
     ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
-    print(f"ECMWF: {len(ec)} rows from {len(ec_shards)} shards, cols {[c for c in ec.columns if c.startswith('ecmwf_')]}")
+    print(f"ECMWF: {len(ec)} rows from {len(ecmwf_names)} shards, cols {[c for c in ec.columns if c.startswith('ecmwf_')]}", flush=True)
     return ec
 
 
@@ -156,7 +166,7 @@ def main() -> int:
     hub = load_configs()["hub"]
 
     # Global catalogue + GFS-global shards from HF.
-    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub import hf_hub_download
 
     st_name = "stations_terrain_global.parquet"
     try:
@@ -165,19 +175,20 @@ def main() -> int:
         stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], "stations_global.parquet", repo_type="dataset"))
     print(f"global stations: {len(stations)}")
 
-    # Download ONLY the global GFS + ECMWF shards. The training repo also holds ~10 GB of
-    # US HRRR/GFS/ASOS shards; a full snapshot_download pulls all 16.6 GB and fills the
-    # GitHub runner's ~14 GB disk, killing the job at ~2-4 min ("operation canceled").
-    # allow_patterns keeps the download to the global shards we actually join.
-    shard_dir = snapshot_download(
-        hub["datasets"]["training"], repo_type="dataset",
-        allow_patterns=["gfs_global/*.parquet", "ecmwf_global/*.parquet"],
-    )
-    shards = sorted(glob.glob(f"{shard_dir}/gfs_global/gfs_*.parquet"))
-    if not shards:
+    # STREAM shards, don't snapshot them all. At 26k stations each GFS shard is ~300 MB
+    # (~7 GB total) and ECMWF ~300 MB (~6 GB) — a full snapshot_download would blow the
+    # runner's ~14 GB disk. Instead list shard names via the API and hf_hub_download each
+    # inside the loop, deleting it after the join (see below). Only the shard list here.
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+    all_files = api.list_repo_files(hub["datasets"]["training"], repo_type="dataset")
+    gfs_names = sorted(f for f in all_files if f.startswith("gfs_global/") and f.endswith(".parquet"))
+    ecmwf_names = sorted(f for f in all_files if f.startswith("ecmwf_global/") and f.endswith(".parquet"))
+    if not gfs_names:
         print("ERROR: no gfs_global shards found — run extract_gfs_global.yml first")
         return 1
-    months = sorted(os.path.basename(s).replace("gfs_", "").replace(".parquet", "") for s in shards)
+    months = sorted(os.path.basename(s).replace("gfs_", "").replace(".parquet", "") for s in gfs_names)
     shard_start = pd.Timestamp(months[0] + "-01").date()
     shard_end = (pd.Timestamp(months[-1] + "-01") + pd.offsets.MonthEnd(1)).date()
 
@@ -223,15 +234,21 @@ def main() -> int:
     del obs
 
     # Load ECMWF (AIFS) predictors once, if present. Additive: absent => GFS-only.
-    ecmwf_slim = load_ecmwf(shard_dir)
+    ecmwf_slim = load_ecmwf(hub["datasets"]["training"], ecmwf_names)
 
     out = Path(args.out) if args.out else dd / "training_table_global"
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("part-*.parquet"):
         old.unlink()
     total = written = 0
-    for i, s in enumerate(shards, 1):
-        gfs = pd.read_parquet(s)
+    from huggingface_hub import hf_hub_download
+
+    n = len(gfs_names)
+    for i, name in enumerate(gfs_names, 1):
+        # Stream: download this GFS shard, join, write the part, delete the shard — so at
+        # 26k stations (~300 MB/shard, ~7 GB total) only one shard is on disk at a time.
+        p = hf_hub_download(hub["datasets"]["training"], name, repo_type="dataset")
+        gfs = pd.read_parquet(p)
         joined = build_global_table(gfs, obs_slim, stations, ecmwf_slim)
         if not joined.empty:
             for c in joined.select_dtypes("float64").columns:
@@ -239,8 +256,12 @@ def main() -> int:
             joined.to_parquet(out / f"part-{i:03d}.parquet", index=False)
             total += len(joined); written += 1
         del gfs, joined
-        if i % 6 == 0 or i == len(shards):
-            print(f"  joined {i}/{len(shards)} shards, {total} rows")
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        if i % 3 == 0 or i == n:
+            print(f"  joined {i}/{n} shards, {total} rows", flush=True)
     if written == 0:
         print("ERROR: no rows survived the obs join")
         return 1
