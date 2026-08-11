@@ -42,14 +42,50 @@ def main() -> int:
 
     api = HfApi(token=os.environ.get("HF_TOKEN") or None)
 
-    # Cache-only mode: build the ECMWF slim frame and upload it, nothing else. Once cached,
-    # every table-part dispatch skips the ~4.6 GB ECMWF re-download and finishes fast — so
-    # banking this one cache (in a short, survivable job) unblocks the rest.
+    # Cache-only mode: build the ECMWF slim frame CHUNKED + resumable. Downloading all
+    # ~4.6 GB of ECMWF shards in one job takes >5 min and the runner is reclaimed ~3 min
+    # into it (persistent throttle). Instead derive ONE shard's slim part per iteration,
+    # upload it (skip-if-exists), and once all parts exist, merge+dedup into the final
+    # slim cache. Each per-shard step downloads ~220 MB (<1 min) — survivable.
     if args.ecmwf_slim_only:
+        from build_training_table_global import add_ecmwf_derived, _ecmwf_slim_key
         files = set(api.list_repo_files(hub["datasets"]["training"], repo_type="dataset"))
         ecmwf_names = sorted(f for f in files if f.startswith("ecmwf_global/") and f.endswith(".parquet"))
-        load_ecmwf(hub["datasets"]["training"], ecmwf_names, hub=hub)
-        print("ECMWF slim cache built (or already present)", flush=True)
+        slim_key = _ecmwf_slim_key(ecmwf_names)
+        if slim_key in files:
+            print(f"ECMWF slim already cached: {slim_key}", flush=True)
+            return 0
+        from mtnwx.data.hub_io import upload_file
+        # per-shard slim parts land under a sibling folder keyed by the same shard set
+        part_dir = slim_key.replace(".parquet", "_parts")
+        for name in ecmwf_names:
+            m = os.path.basename(name).replace("ecmwf_", "").replace(".parquet", "")
+            ppart = f"{part_dir}/{m}.parquet"
+            if ppart in files:
+                print(f"skip slim part {m} (exists)", flush=True)
+                continue
+            p = hf_hub_download(hub["datasets"]["training"], name, repo_type="dataset")
+            slim = add_ecmwf_derived(pd.read_parquet(p))
+            os.remove(p) if os.path.exists(p) else None
+            outp = dd / f"ecmwf_slimpart_{m}.parquet"
+            slim.to_parquet(outp, index=False, compression="zstd")
+            upload_file(outp, ppart, hub["datasets"]["training"], repo_type="dataset")
+            os.remove(outp) if os.path.exists(outp) else None
+            print(f"uploaded slim part {m} ({len(slim)} rows)", flush=True)
+        # All per-shard parts present? merge+dedup -> final slim cache.
+        files = set(api.list_repo_files(hub["datasets"]["training"], repo_type="dataset"))
+        part_names = sorted(f for f in files if f.startswith(part_dir + "/") and f.endswith(".parquet"))
+        if len(part_names) < len(ecmwf_names):
+            print(f"slim parts {len(part_names)}/{len(ecmwf_names)} — re-dispatch to finish", flush=True)
+            return 0
+        frames = [pd.read_parquet(hf_hub_download(hub["datasets"]["training"], pn, repo_type="dataset")) for pn in part_names]
+        ec = pd.concat(frames, ignore_index=True); del frames
+        ec["valid_time"] = pd.to_datetime(ec["valid_time"])
+        ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
+        outp = dd / "ecmwf_slim.parquet"
+        ec.to_parquet(outp, index=False, compression="zstd")
+        upload_file(outp, slim_key, hub["datasets"]["training"], repo_type="dataset")
+        print(f"ECMWF slim cache built: {slim_key} ({len(ec)} rows from {len(part_names)} parts)", flush=True)
         return 0
 
     months = []
