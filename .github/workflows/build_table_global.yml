@@ -38,17 +38,14 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - name: Install
+      - name: Install (minimal — this workflow only joins parquet, never trains)
         run: |
-          # Merge-only modes (obs/ECMWF slim) need just pandas+pyarrow+hf_hub, not the full
-          # train stack (lightgbm/xarray/zarr/duckdb). A minimal install is ~15s vs ~90s,
-          # leaving the whole ~2min survival window for actual work under the throttle.
-          if [ "${{ github.event.inputs.slim_only }}" = "true" ] || [ "${{ github.event.inputs.obs_merge_only }}" = "true" ]; then
-            pip install pandas pyarrow "huggingface_hub>=0.20" pyyaml numpy
-            pip install -e . --no-deps
-          else
-            pip install -e ".[train]"
-          fi
+          # The table build + merges are pure pandas/parquet work — no lightgbm/xarray/zarr/
+          # duckdb (training is a separate workflow). A minimal install is ~15s vs the ~90s
+          # full-train install that was eating most of the ~2min survival window under the
+          # throttle, starving the actual work. Install only what the join/merge path imports.
+          pip install pandas pyarrow "huggingface_hub>=0.20" pyyaml numpy
+          pip install -e . --no-deps
 
       - name: Free runner disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
