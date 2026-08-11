@@ -67,6 +67,11 @@ def main() -> int:
             p = hf_hub_download(hub["datasets"]["training"], name, repo_type="dataset")
             slim = add_ecmwf_derived(pd.read_parquet(p))
             os.remove(p) if os.path.exists(p) else None
+            # Dedup within the shard-month up front (6-hourly inits × leads create many
+            # duplicate station×valid_time rows) so each part — and thus the merge
+            # download — is a fraction of the raw shard size.
+            slim["valid_time"] = pd.to_datetime(slim["valid_time"])
+            slim = slim.drop_duplicates(["station_id", "valid_time"], keep="last")
             outp = dd / f"ecmwf_slimpart_{m}.parquet"
             slim.to_parquet(outp, index=False, compression="zstd")
             upload_file(outp, ppart, hub["datasets"]["training"], repo_type="dataset")
@@ -78,10 +83,38 @@ def main() -> int:
         if len(part_names) < len(ecmwf_names):
             print(f"slim parts {len(part_names)}/{len(ecmwf_names)} — re-dispatch to finish", flush=True)
             return 0
-        frames = [pd.read_parquet(hf_hub_download(hub["datasets"]["training"], pn, repo_type="dataset")) for pn in part_names]
-        ec = pd.concat(frames, ignore_index=True); del frames
-        ec["valid_time"] = pd.to_datetime(ec["valid_time"])
-        ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
+        # CHECKPOINTED merge: fold parts into a running deduped frame, and every few parts
+        # save the running frame + the list of folded parts back to HF. On reclaim, resume
+        # from the checkpoint instead of restarting — so the merge survives the throttle
+        # across dispatches. Each part is ~400 MB (<1 min), checkpoint is the deduped frame.
+        ckpt_key = slim_key.replace(".parquet", "_ckpt.parquet")
+        done_key = slim_key.replace(".parquet", "_ckpt_done.txt")
+        ec, folded = None, set()
+        try:
+            cp = hf_hub_download(hub["datasets"]["training"], ckpt_key, repo_type="dataset")
+            ec = pd.read_parquet(cp)
+            ec["valid_time"] = pd.to_datetime(ec["valid_time"])
+            dp = hf_hub_download(hub["datasets"]["training"], done_key, repo_type="dataset")
+            folded = set(open(dp).read().split())
+            print(f"resumed merge checkpoint: {len(folded)} parts folded, {len(ec)} rows", flush=True)
+        except Exception:
+            ec, folded = None, set()
+        todo_parts = [pn for pn in part_names if pn not in folded]
+        for i, pn in enumerate(todo_parts, 1):
+            pp = hf_hub_download(hub["datasets"]["training"], pn, repo_type="dataset")
+            part = pd.read_parquet(pp)
+            os.remove(pp) if os.path.exists(pp) else None
+            part["valid_time"] = pd.to_datetime(part["valid_time"])
+            ec = part if ec is None else pd.concat([ec, part], ignore_index=True)
+            del part
+            ec = ec.drop_duplicates(["station_id", "valid_time"], keep="last")
+            folded.add(pn)
+            if i % 3 == 0 or i == len(todo_parts):  # checkpoint every 3 parts
+                cf = dd / "ecmwf_ckpt.parquet"; ec.to_parquet(cf, index=False, compression="zstd")
+                upload_file(cf, ckpt_key, hub["datasets"]["training"], repo_type="dataset")
+                (dd / "ckpt_done.txt").write_text("\n".join(sorted(folded)))
+                upload_file(dd / "ckpt_done.txt", done_key, hub["datasets"]["training"], repo_type="dataset")
+                print(f"checkpoint: {len(folded)}/{len(part_names)} folded ({len(ec)} rows)", flush=True)
         outp = dd / "ecmwf_slim.parquet"
         ec.to_parquet(outp, index=False, compression="zstd")
         upload_file(outp, slim_key, hub["datasets"]["training"], repo_type="dataset")
