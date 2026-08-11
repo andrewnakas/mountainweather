@@ -211,6 +211,36 @@
   }
   map.on("move zoom resize viewreset", ()=>{ resize(); render(); });
 
+  // Spatial hash over screen-space stations: bucket size = influence radius R, so any
+  // station within R of a point lies in the point's own bucket or one of its 8 neighbors.
+  // Lets the IDW field + particle sampling touch only nearby stations, not all of them.
+  const _spIndex = {
+    cell:90, cols:0, rows:0, buckets:null,
+    build(sp, R, W, H){
+      this.cell=R; this.cols=Math.ceil(W/R)+1; this.rows=Math.ceil(H/R)+1;
+      const n=this.cols*this.rows;
+      // reuse arrays where possible
+      if(!this.buckets || this.buckets.length!==n){ this.buckets=new Array(n); for(let i=0;i<n;i++) this.buckets[i]=[]; }
+      else { for(let i=0;i<n;i++) this.buckets[i].length=0; }
+      for(const st of sp){
+        const cx=Math.floor(st.x/R), cy=Math.floor(st.y/R);
+        if(cx<0||cy<0||cx>=this.cols||cy>=this.rows) continue;
+        this.buckets[cy*this.cols+cx].push(st);
+      }
+    },
+    forNear(px, py, fn){
+      const cx=Math.floor(px/this.cell), cy=Math.floor(py/this.cell);
+      for(let gy=cy-1; gy<=cy+1; gy++){
+        if(gy<0||gy>=this.rows) continue;
+        for(let gx=cx-1; gx<=cx+1; gx++){
+          if(gx<0||gx>=this.cols) continue;
+          const b=this.buckets[gy*this.cols+gx];
+          for(let i=0;i<b.length;i++) fn(b[i]);
+        }
+      }
+    }
+  };
+
   // Sample stations to screen coords for the current hour; build an interpolated
   // wind/var field on a coarse grid (inverse-distance weighting), tinted over the land.
   function render(){
@@ -228,32 +258,32 @@
     ctx.clearRect(0,0,W,H);
     if(!sp.length){ drawTime(); return; }
 
-    // SMOOTH continuous field (no blocky "blotches"): compute a proper IDW value on a
-    // coarse grid, then let the browser bilinearly upscale it. IDW = Σ(w·v)/Σw with
-    // w = 1/d², so the result is a true weighted average (never over-saturates the way
-    // additive splatting does). Coverage (Σw, i.e. nearness to any station) sets alpha
-    // so sparse areas fade out. The coarse grid + smoothing upscale = smooth field, fast.
+    // SMOOTH continuous field via IDW on a coarse grid, upscaled. IDW = Σ(w·v)/Σw with
+    // w=1/d². Naive IDW is O(cells × stations) — at a wide zoom that's ~19k cells ×
+    // thousands of stations = >100M ops PER FRAME, which is the lag. Fix: bin stations
+    // into a spatial hash keyed on the influence radius R, then each cell only sums
+    // stations in its own + 8 neighbor buckets (all that can be within R). Turns the inner
+    // loop from "all stations" into "a handful", ~100x faster with identical output.
+    const R=90, R2=R*R;
+    _spIndex.build(sp, R, W, H);
     const dom=VARS[activeVar].dom, span=(dom[1]-dom[0])||1;
     const GS=10;                                   // grid cell (px) — small enough to look smooth after upscale
     const gw=Math.ceil(W/GS)+1, gh=Math.ceil(H/GS)+1;
     const grid=fieldCanvas(gw,gh);                 // offscreen low-res field
     const gimg=grid.createImageData(gw,gh); const G=gimg.data;
-    // Max influence radius (px): beyond this from the NEAREST station the field fades to
-    // transparent, so sparse/global data (isolated clusters, oceans, gaps) never paints a
-    // solid extrapolated blob. Alpha ramps smoothly from full (near) to 0 (at the radius).
-    const R=90, R2=R*R;
     for(let gy=0; gy<gh; gy++){
       for(let gx=0; gx<gw; gx++){
         const px=gx*GS, py=gy*GS;
         let sw=0, sv=0, nd2=Infinity;
-        for(const st of sp){ const dx=px-st.x, dy=py-st.y; const d2=dx*dx+dy*dy+1;
+        _spIndex.forNear(px, py, (st)=>{
+          const dx=px-st.x, dy=py-st.y, d2=dx*dx+dy*dy+1;
           if(d2<nd2) nd2=d2;
-          const w=1/(d2*d2); sw+=w; sv+=w*st.v; }
+          if(d2<=R2){ const w=1/(d2*d2); sw+=w; sv+=w*st.v; }
+        });
         const idx=(gy*gw+gx)*4;
         if(sw<1e-9 || nd2>R2){ G[idx+3]=0; continue; }   // no station within R -> transparent
         const val=sv/sw;                           // true IDW weighted mean (bounded to data range)
         const [r,g,b]=colorFor(val);
-        // Alpha from nearest-station distance: opaque up close, linear fade to 0 at radius R.
         const nearFade=1-Math.sqrt(nd2)/R;         // 1 at a station, 0 at the radius
         G[idx]=r; G[idx+1]=g; G[idx+2]=b;
         G[idx+3]=Math.max(0, Math.min(170, 170*nearFade));
@@ -266,8 +296,10 @@
     ctx.drawImage(grid.canvas, 0,0, gw,gh, 0,0, gw*GS, gh*GS);
     ctx.globalAlpha=1;
 
-    // wind direction arrows (only for wind vars) — quiver over the land
-    if(activeVar.startsWith("wind")){
+    // wind direction arrows (only for wind vars) — quiver over the land. Skip when dense:
+    // thousands of tiny arrows are visual noise + slow, and the animated particles already
+    // show flow at wide zoom. Draw the quiver only when zoomed in / sparse.
+    if(activeVar.startsWith("wind") && (map.getZoom() >= 6 || sp.length <= 1200)){
       ctx.strokeStyle="rgba(255,255,255,.55)"; ctx.lineWidth=1.1;
       for(const st of sp){
         if(st.dir==null||isNaN(st.dir)) continue;
@@ -299,10 +331,14 @@
     ctx.stroke();
   }
   function drawStations(sp){
+    // Station dots add little over the smooth field when they're densely packed, and
+    // drawing thousands per frame is costly — only render them when zoomed in enough that
+    // they're sparse and informative (map zoom >= 6). Otherwise the field alone tells it.
+    if(map.getZoom() < 6 || sp.length > 1200) return;
+    ctx.lineWidth=0.8; ctx.strokeStyle="rgba(255,255,255,.4)";
     for(const st of sp){ const [r,g,b]=colorFor(st.v);
       ctx.beginPath(); ctx.arc(st.x,st.y,2.6,0,6.283);
-      ctx.fillStyle=`rgb(${r|0},${g|0},${b|0})`; ctx.fill();
-      ctx.lineWidth=0.8; ctx.strokeStyle="rgba(255,255,255,.4)"; ctx.stroke();
+      ctx.fillStyle=`rgb(${r|0},${g|0},${b|0})`; ctx.fill(); ctx.stroke();
     }
   }
   function drawTime(){
@@ -317,19 +353,21 @@
     particles=Array.from({length:900},()=>({x:Math.random(),y:Math.random(),age:Math.random()*100}));
     requestAnimationFrame(tick);
   }
-  function windAt(cx,cy){ // sample nearest-few station wind vector at screen px
+  function windAt(cx,cy){ // sample nearby-station wind vector at screen px
+    // Reuse the spatial index built in render() (already in screen coords, with v=wind
+    // speed + dir for the active wind var). Old code looped ALL stations AND re-projected
+    // each via latLngToContainerPoint every particle every frame — 900×~9k projections/
+    // frame, the main lag source. Now only the ~handful within 90px are touched.
     let sw=0,ux=0,uy=0;
-    for(const p of PTS){
-      const v=p.vals.wind_speed_ms[t], d=p.dir[t];
-      if(v==null||d==null||isNaN(v)||isNaN(d)) continue;
-      const pt=map.latLngToContainerPoint([p.lat,p.lon]);
-      const dx=cx-pt.x, dy=cy-pt.y, d2=dx*dx+dy*dy+1;
-      if(d2>8100) continue;   // 90px radius — match the IDW field cutoff so particles only
-                              // stream near stations (no dense blob over sparse/global gaps)
-      const w=1/(d2); sw+=w;
+    _spIndex.forNear(cx, cy, (st)=>{
+      const v=st.v, d=st.dir;
+      if(v==null||d==null||isNaN(v)||isNaN(d)) return;
+      const dx=cx-st.x, dy=cy-st.y, d2=dx*dx+dy*dy+1;
+      if(d2>8100) return;     // 90px radius (matches the field cutoff)
+      const w=1/d2; sw+=w;
       const ang=(d+180)*Math.PI/180;
       ux+=w*Math.sin(ang)*v; uy+=w*(-Math.cos(ang))*v;
-    }
+    });
     if(sw===0) return null; return [ux/sw, uy/sw];
   }
   function tick(){
