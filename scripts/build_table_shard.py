@@ -86,7 +86,7 @@ def main() -> int:
             os.remove(pp) if os.path.exists(pp) else None
             obs = part if obs is None else pd.concat([obs, part], ignore_index=True)
             del part; folded.add(pn)
-            if i % 4 == 0 or i == len(todo):
+            if True:  # checkpoint after EVERY part — the ~2min window is too tight to risk
                 cf = dd / "obs_ckpt.parquet"; obs.to_parquet(cf, index=False, compression="zstd")
                 upload_file(cf, ck_key, hub["datasets"]["verify"], repo_type="dataset")
                 (dd / "obs_done.txt").write_text("\n".join(sorted(folded)))
