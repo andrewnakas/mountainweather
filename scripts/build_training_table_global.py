@@ -308,9 +308,19 @@ def main() -> int:
     parts_folder = f"obs_parts/obsG_{start}_{end}_n{len(stations)}_{sid_hash}"
     obs = None
 
-    # Preferred at 26k scale: assemble obs from the resumable BATCH parts written by
-    # collect_obs_batch.py (inline collection of 26k stations runs >90 min and gets
-    # reclaimed mid-run, losing everything). Read only the join columns from each part.
+    # Prefer the SINGLE-FILE obs cache — one fast read. Loading the 12 batch parts is 12
+    # downloads (~1.9 GB) which is too slow to reach the first month build before the
+    # runner is reclaimed under the throttle; the merged single file avoids that. Built by
+    # `build_table_shard.py --obs-merge-only`.
+    if not args.no_obs_cache and obs is None:
+        try:
+            obs_path = hf_hub_download(hub["datasets"]["verify"], obs_key, repo_type="dataset")
+            obs = pd.read_parquet(obs_path, columns=[c for c in OBS_JOIN_COLS])
+            print(f"loaded single-file obs cache ({len(obs)} rows)", flush=True)
+        except Exception:
+            obs = None
+
+    # Fallback: assemble from the resumable BATCH parts (12 downloads).
     if not args.no_obs_cache and obs is None:
         try:
             from huggingface_hub import HfApi
@@ -326,17 +336,7 @@ def main() -> int:
                 del frames
                 print(f"loaded global obs from {len(part_names)} batch parts ({len(obs)} rows)", flush=True)
         except Exception as e:  # noqa: BLE001
-            print(f"WARN: batch-parts load failed ({e}); trying single-file cache")
-            obs = None
-
-    if not args.no_obs_cache and obs is None:
-        try:
-            # Read ONLY the join columns from the parquet — loading all columns of the
-            # multi-M-row frame is what pushed the 7 GB runner into OOM (exit 143).
-            obs_path = hf_hub_download(hub["datasets"]["verify"], obs_key, repo_type="dataset")
-            obs = pd.read_parquet(obs_path, columns=[c for c in OBS_JOIN_COLS])
-            print(f"loaded cached global obs ({len(obs)} rows, {len(obs.columns)} cols)")
-        except Exception:
+            print(f"WARN: batch-parts load failed ({e})")
             obs = None
     if obs is None:
         print(f"collecting global obs {start}..{end} for {len(stations)} stations...")

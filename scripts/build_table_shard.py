@@ -35,12 +35,44 @@ def main() -> int:
     ap.add_argument("--months", help="Comma-separated months (loads obs+ECMWF once, loops)")
     ap.add_argument("--ecmwf-slim-only", action="store_true",
                     help="Just build+cache the ECMWF slim frame (short job, better survival), then exit")
+    ap.add_argument("--obs-merge-only", action="store_true",
+                    help="Merge the 12 obs batch parts into ONE obs cache file (so the table build "
+                         "loads obs in a single fast read instead of 12 part downloads), then exit")
     args = ap.parse_args()
     hub = load_configs()["hub"]
     dd = data_dir()
     from huggingface_hub import HfApi, hf_hub_download
 
     api = HfApi(token=os.environ.get("HF_TOKEN") or None)
+
+    # Merge obs parts -> single obs cache file. The builder checks the single-file obs_key
+    # cache; assembling it once turns the table build's obs load from 12 downloads (~1.9 GB,
+    # too slow to reach month 1 before reclaim) into one read.
+    if args.obs_merge_only:
+        import hashlib
+        try:
+            stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], "stations_terrain_global.parquet", repo_type="dataset"))
+        except Exception:
+            stations = pd.read_parquet(hf_hub_download(hub["datasets"]["stations"], "stations_global.parquet", repo_type="dataset"))
+        stations = stations.sort_values("station_id").reset_index(drop=True)
+        sidh = hashlib.md5("|".join(sorted(stations["station_id"].astype(str))).encode()).hexdigest()[:8]
+        obs_key = f"obs/obsG_2024-01-01_2025-12-31_n{len(stations)}_{sidh}.parquet"
+        files = set(api.list_repo_files(hub["datasets"]["verify"], repo_type="dataset"))
+        if obs_key in files:
+            print(f"single-file obs cache already exists: {obs_key}", flush=True)
+            return 0
+        from build_training_table_global import assemble_obs_from_parts
+        obs = assemble_obs_from_parts(hub, stations)
+        if obs is None:
+            print("ERROR: obs parts not found"); return 1
+        for c in obs.select_dtypes("float64").columns:
+            obs[c] = obs[c].astype("float32")
+        outp = dd / "obsG_merged.parquet"
+        obs.to_parquet(outp, index=False, compression="zstd")
+        from mtnwx.data.hub_io import upload_file
+        upload_file(outp, obs_key, hub["datasets"]["verify"], repo_type="dataset")
+        print(f"merged obs cache built: {obs_key} ({len(obs)} rows)", flush=True)
+        return 0
 
     # Cache-only mode: build the ECMWF slim frame CHUNKED + resumable. Downloading all
     # ~4.6 GB of ECMWF shards in one job takes >5 min and the runner is reclaimed ~3 min

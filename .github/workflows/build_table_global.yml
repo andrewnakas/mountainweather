@@ -15,6 +15,9 @@ on:
       slim_only:
         description: "Only build+cache the ECMWF slim frame (short job), then exit"
         default: "false"
+      obs_merge_only:
+        description: "Only merge obs parts into one cache file, then exit"
+        default: "false"
 
 permissions:
   contents: read
@@ -52,6 +55,10 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.slim_only }}" = "true" ]; then
             python scripts/build_table_shard.py --ecmwf-slim-only
+            exit 0
+          fi
+          if [ "${{ github.event.inputs.obs_merge_only }}" = "true" ]; then
+            python scripts/build_table_shard.py --obs-merge-only
             exit 0
           fi
           MONTHS="${{ github.event.inputs.months }}"
