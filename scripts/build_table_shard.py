@@ -61,15 +61,39 @@ def main() -> int:
         if obs_key in files:
             print(f"single-file obs cache already exists: {obs_key}", flush=True)
             return 0
-        from build_training_table_global import assemble_obs_from_parts
-        obs = assemble_obs_from_parts(hub, stations)
-        if obs is None:
+        # CHECKPOINTED merge of the 12 obs parts (each ~160 MB) — the runner is reclaimed
+        # ~2min into downloading all of them, so fold + checkpoint every 4 parts and resume.
+        from build_training_table_global import obs_parts_prefix, OBS_JOIN_COLS
+        from mtnwx.data.hub_io import upload_file
+        prefix = obs_parts_prefix(stations)
+        vfiles = api.list_repo_files(hub["datasets"]["verify"], repo_type="dataset")
+        part_names = sorted(f for f in vfiles if f.startswith(prefix + "/") and f.endswith(".parquet"))
+        if not part_names:
             print("ERROR: obs parts not found"); return 1
-        for c in obs.select_dtypes("float64").columns:
-            obs[c] = obs[c].astype("float32")
+        ck_key = obs_key.replace(".parquet", "_ckpt.parquet")
+        done_key = obs_key.replace(".parquet", "_ckpt_done.txt")
+        obs, folded = None, set()
+        try:
+            obs = pd.read_parquet(hf_hub_download(hub["datasets"]["verify"], ck_key, repo_type="dataset"))
+            folded = set(open(hf_hub_download(hub["datasets"]["verify"], done_key, repo_type="dataset")).read().split())
+            print(f"resumed obs merge: {len(folded)} parts, {len(obs)} rows", flush=True)
+        except Exception:
+            obs, folded = None, set()
+        todo = [pn for pn in part_names if pn not in folded]
+        for i, pn in enumerate(todo, 1):
+            pp = hf_hub_download(hub["datasets"]["verify"], pn, repo_type="dataset")
+            part = pd.read_parquet(pp, columns=[c for c in OBS_JOIN_COLS])
+            os.remove(pp) if os.path.exists(pp) else None
+            obs = part if obs is None else pd.concat([obs, part], ignore_index=True)
+            del part; folded.add(pn)
+            if i % 4 == 0 or i == len(todo):
+                cf = dd / "obs_ckpt.parquet"; obs.to_parquet(cf, index=False, compression="zstd")
+                upload_file(cf, ck_key, hub["datasets"]["verify"], repo_type="dataset")
+                (dd / "obs_done.txt").write_text("\n".join(sorted(folded)))
+                upload_file(dd / "obs_done.txt", done_key, hub["datasets"]["verify"], repo_type="dataset")
+                print(f"obs checkpoint: {len(folded)}/{len(part_names)} ({len(obs)} rows)", flush=True)
         outp = dd / "obsG_merged.parquet"
         obs.to_parquet(outp, index=False, compression="zstd")
-        from mtnwx.data.hub_io import upload_file
         upload_file(outp, obs_key, hub["datasets"]["verify"], repo_type="dataset")
         print(f"merged obs cache built: {obs_key} ({len(obs)} rows)", flush=True)
         return 0
