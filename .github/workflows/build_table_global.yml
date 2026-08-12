@@ -32,11 +32,11 @@ jobs:
     env:
       MTNWX_REGION: global
       PYTHONUNBUFFERED: "1"
-      # Fast, resilient downloads: hf_transfer (Rust) is much faster than the Python
-      # downloader and doesn't stall the way plain hf_hub_download did (jobs hung 14+ min
-      # on the obs-parts download, wasting good runners). Bound the connect/read timeout so
-      # a stalled connection aborts+retries instead of hanging.
-      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      # Fast, resilient downloads via Xet high-performance transfer (the modern HF client
+      # uses Xet, not the deprecated hf_transfer). This is much faster + doesn't stall the
+      # way plain downloads did (jobs hung 14+ min on the obs-parts download). Bound the
+      # timeout so a stalled connection aborts+retries instead of hanging.
+      HF_XET_HIGH_PERFORMANCE: "1"
       HF_HUB_DOWNLOAD_TIMEOUT: "20"
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
           # duckdb (training is a separate workflow). A minimal install is ~15s vs the ~90s
           # full-train install that was eating most of the ~2min survival window under the
           # throttle, starving the actual work. Install only what the join/merge path imports.
-          pip install pandas pyarrow "huggingface_hub>=0.20" hf_transfer pyyaml numpy
+          pip install pandas pyarrow "huggingface_hub>=0.20" "hf_xet" pyyaml numpy
           pip install -e . --no-deps
 
       - name: Free runner disk
