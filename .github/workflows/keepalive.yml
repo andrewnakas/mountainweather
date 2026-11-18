@@ -1,0 +1,21 @@
+# GitHub switches off scheduled workflows in a repository with no commits for
+# 60 days. These pipelines feed tree60weather.com and the iOS app, and went
+# dark that way in Oct/Nov 2026. One empty commit a month keeps them on.
+# "[skip ci]" so the commit starts no push-triggered builds.
+name: keepalive
+on:
+  schedule:
+    - cron: '17 6 1 * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit --allow-empty -m "keepalive [skip ci]"
+          git push
