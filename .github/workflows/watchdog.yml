@@ -1,0 +1,50 @@
+name: watchdog
+
+# Starts any scheduled run GitHub's cron scheduler dropped. In November 2026 it
+# dropped most crons here for hours at a time, with its status page green, and
+# the layers these runs feed went stale. .github/watchdog/watchdog.py has the
+# details; .github/watchdog/tasks.json lists what it watches.
+#
+# It keeps itself going: each run watches for about 5h40m (the job limit is
+# 6 h), then dispatches its successor, which waits in the concurrency group
+# below and starts as this one ends. GITHUB_TOKEN may trigger workflow_dispatch,
+# so no personal token is needed. Runner minutes are free in a public repo.
+#
+# The cron here only restarts the chain if a run ever fails to hand over. A
+# cron run that arrives while one is going waits in the group and is replaced
+# (shown as cancelled) when the running one hands over; that is expected.
+#
+# To stop it: Actions → watchdog → Disable workflow (or `gh workflow disable
+# watchdog`). The run in progress finishes and nothing follows it.
+on:
+  schedule:
+    - cron: '7 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Watch the schedule
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/watchdog/watchdog.py --minutes 340
+
+      # Only after a clean run: a watchdog that fails at startup must not
+      # re-dispatch itself in a tight loop. The cron above picks the chain
+      # back up if this is ever skipped.
+      - name: Hand over to the next watchdog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run watchdog.yml --repo "$GITHUB_REPOSITORY"

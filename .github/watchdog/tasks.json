@@ -1,0 +1,6 @@
+{
+  "_about": "The task's cron is copied from forecast.yml's schedule; change both together. grace is how many minutes after the slot to wait for GitHub's own run before dispatching one.",
+  "tasks": [
+    {"workflow": "forecast.yml", "cron": "20 * * * *", "grace": 30}
+  ]
+}
