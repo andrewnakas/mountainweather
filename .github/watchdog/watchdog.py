@@ -123,24 +123,36 @@ def check(repo, ref, tasks, now, dry_run):
                 listed[task["workflow"]] = api(
                     "GET", f"/repos/{repo}/actions/workflows/{task['workflow']}/runs?per_page=100"
                 )["workflow_runs"]
-            runs = [
+            mine = [
                 r for r in listed[task["workflow"]]
+                if "title" not in task or r["display_title"] == task["title"]
+            ]
+            # Stuck from any slot, not just the latest. A run left over from
+            # an earlier slot holds the workflow's concurrency group, so the
+            # run for the current slot waits "pending" behind it for as long
+            # as it sits there. Timed from updated_at, which is when a run
+            # waiting on its group became queued for a runner.
+            stuck = [
+                r for r in mine
+                if r["status"] == "queued" and now - parse_time(r["updated_at"]) > STUCK_AFTER
+            ]
+            for run in stuck:
+                print(f"{now:%H:%MZ} {task['label']}: run {run['id']} has been queued "
+                      f"since {parse_time(run['updated_at']):%H:%MZ} with no runner, "
+                      f"{'would cancel' if dry_run else 'cancelling'}", flush=True)
+                if not dry_run:
+                    api("POST", f"/repos/{repo}/actions/runs/{run['id']}/cancel")
+            runs = [
+                r for r in mine
                 if parse_time(r["created_at"]) >= slot
                 and r.get("conclusion") != "cancelled"
-                and ("title" not in task or r["display_title"] == task["title"])
+                and r not in stuck
             ]
-            stuck = [
-                r for r in runs
-                if r["status"] == "queued" and now - parse_time(r["created_at"]) > STUCK_AFTER
-            ]
-            if runs and len(stuck) < len(runs):
+            if runs:
                 continue
-            why = "stuck in the queue with no runner" if stuck else "nothing has started"
-            print(f"{now:%H:%MZ} {task['label']}: {why} since the {slot:%H:%MZ} slot, "
+            print(f"{now:%H:%MZ} {task['label']}: nothing running since the {slot:%H:%MZ} slot, "
                   f"{'would dispatch' if dry_run else 'dispatching'}", flush=True)
             if not dry_run:
-                for run in stuck:
-                    api("POST", f"/repos/{repo}/actions/runs/{run['id']}/cancel")
                 api("POST", f"/repos/{repo}/actions/workflows/{task['workflow']}/dispatches",
                     {"ref": ref, "inputs": task["inputs"]})
             started.append(task["label"])
