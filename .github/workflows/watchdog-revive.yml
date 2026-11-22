@@ -1,0 +1,53 @@
+name: watchdog revive
+
+# Restarts the watchdog when a run dies part way through. On 2026-11-22 a
+# hosted runner "lost communication with the server" 70 minutes into a
+# watchdog run, so the run never reached its hand-over step, and the backup
+# cron in watchdog.yml was being dropped by GitHub's scheduler at the time.
+# Nothing restarted the chain for the next 20 minutes, until it was started
+# by hand.
+#
+# A run completing is an event, not a cron, so this fires even while the
+# scheduler is dropping crons.
+#
+# It only revives a run that failed after it had been running for 10 minutes
+# or more. A watchdog that fails at startup has a bug in it, and dispatching
+# it again would only repeat the failure in a tight loop. The cron picks the
+# chain up again once that is fixed.
+on:
+  workflow_run:
+    workflows: [watchdog]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  revive:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure'
+      || github.event.workflow_run.conclusion == 'timed_out'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch a new watchdog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STARTED: ${{ github.event.workflow_run.run_started_at }}
+          ENDED: ${{ github.event.workflow_run.updated_at }}
+        run: |
+          ran=$(( $(date -d "$ENDED" +%s) - $(date -d "$STARTED" +%s) ))
+          echo "The failed watchdog ran for $((ran / 60)) min."
+          if [ "$ran" -lt 600 ]; then
+            echo "It failed within 10 minutes; not reviving a run that fails at startup."
+            exit 0
+          fi
+          live=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow watchdog.yml \
+            --limit 20 --json status \
+            --jq '[.[] | select(.status != "completed")] | length')
+          if [ "$live" -gt 0 ]; then
+            echo "A watchdog is already queued or running."
+            exit 0
+          fi
+          gh workflow run watchdog.yml --repo "$GITHUB_REPOSITORY"
+          echo "Dispatched a new watchdog."

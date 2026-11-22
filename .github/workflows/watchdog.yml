@@ -10,9 +10,11 @@ name: watchdog
 # below and starts as this one ends. GITHUB_TOKEN may trigger workflow_dispatch,
 # so no personal token is needed. Runner minutes are free in a public repo.
 #
-# The cron here only restarts the chain if a run ever fails to hand over. A
-# cron run that arrives while one is going waits in the group and is replaced
-# (shown as cancelled) when the running one hands over; that is expected.
+# If a run dies part way through (a hosted runner can lose its connection),
+# watchdog-revive.yml dispatches a new one as soon as it fails. The cron here
+# is the last resort, for anything that gets past both. A cron run that
+# arrives while one is going waits in the group and is replaced (shown as
+# cancelled) when the running one hands over; that is expected.
 #
 # To stop it: Actions → watchdog → Disable workflow (or `gh workflow disable
 # watchdog`). The run in progress finishes and nothing follows it.
