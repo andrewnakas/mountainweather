@@ -5,19 +5,27 @@ name: watchdog
 # the layers these runs feed went stale. .github/watchdog/watchdog.py has the
 # details; .github/watchdog/tasks.json lists what it watches.
 #
-# It keeps itself going: each run watches for about 5h40m (the job limit is
-# 6 h), then dispatches its successor, which waits in the concurrency group
-# below and starts as this one ends. GITHUB_TOKEN may trigger workflow_dispatch,
-# so no personal token is needed. Runner minutes are free in a public repo.
+# It keeps itself going. Once its first check has worked, each run dispatches
+# its successor, which waits in the concurrency group below for as long as
+# this run lasts. If this run ends for any reason (its ~5h40m are up, or a
+# hosted runner loses its connection part way through, as one did on
+# 2026-11-22), the successor starts right away. GITHUB_TOKEN may trigger
+# workflow_dispatch, so no personal token is needed. Runner minutes are free in
+# a public repo.
 #
-# If a run dies part way through (a hosted runner can lose its connection),
-# watchdog-revive.yml dispatches a new one as soon as it fails. The cron here
-# is the last resort, for anything that gets past both. A cron run that
-# arrives while one is going waits in the group and is replaced (shown as
-# cancelled) when the running one hands over; that is expected.
+# Dispatching the successor at the start rather than at the end is what makes
+# a mid-run death survivable. A `workflow_run` trigger cannot do it: runs that
+# GITHUB_TOKEN started do not fire workflow_run, and after the first hand-over
+# every run here is one of those.
+#
+# The cron here only restarts the chain if it ever breaks, for example when a
+# run fails its first check. A cron run that arrives while one is going
+# replaces the waiting successor (shown as cancelled); that is expected, and it
+# dispatches a successor of its own once it starts.
 #
 # To stop it: Actions → watchdog → Disable workflow (or `gh workflow disable
-# watchdog`). The run in progress finishes and nothing follows it.
+# watchdog`), then cancel the waiting run. The run in progress finishes and
+# nothing follows it.
 on:
   schedule:
     - cron: '7 */2 * * *'
@@ -38,15 +46,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Watch the schedule
+      # A watchdog that fails at startup must not dispatch a successor, or it
+      # would restart itself in a tight loop. The cron above picks the chain
+      # back up once that is fixed.
+      - name: First check
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 .github/watchdog/watchdog.py --minutes 340
+        run: python3 .github/watchdog/watchdog.py --once
 
-      # Only after a clean run: a watchdog that fails at startup must not
-      # re-dispatch itself in a tight loop. The cron above picks the chain
-      # back up if this is ever skipped.
-      - name: Hand over to the next watchdog
+      - name: Line up the next watchdog
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run watchdog.yml --repo "$GITHUB_REPOSITORY"
+
+      # The sleep gives anything the first check dispatched time to show up in
+      # the run list, so the next check does not dispatch it again.
+      - name: Watch the schedule
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sleep 300
+          python3 .github/watchdog/watchdog.py --minutes 330

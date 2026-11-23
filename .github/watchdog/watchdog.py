@@ -27,7 +27,8 @@ the work.
 
 workflow_dispatch is the one event the repository's own GITHUB_TOKEN is
 allowed to trigger, so no personal token is involved. watchdog.yml runs this
-for most of the six-hour job limit and then dispatches its own successor.
+for most of the six-hour job limit, with its successor already dispatched and
+waiting to take over.
 
 Check once from a laptop, changing nothing:
     GITHUB_TOKEN=$(gh auth token) GITHUB_REPOSITORY=owner/repo \\
