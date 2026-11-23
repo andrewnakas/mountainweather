@@ -15,8 +15,15 @@ The crons stay where they are and normally get there first; the watchdog only
 fills in what they miss, so on a good day it dispatches nothing.
 
 It also clears the other failure seen that month: a run that sits "queued"
-for an hour with no runner ever assigned. Cancelling it and dispatching a
+for hours with no runner ever assigned. Cancelling it and dispatching a
 fresh one got it going within minutes every time.
+
+A run that is only waiting its turn is left alone, however late it is. On the
+22nd runners took about an hour to arrive for every run on the account, and
+cancelling at 60 minutes sent each run to the back of the queue just before
+its turn came. Such a run also counts as the current slot's run: it fetches
+the latest data when it starts, so a second one behind it would only repeat
+the work.
 
 workflow_dispatch is the one event the repository's own GITHUB_TOKEN is
 allowed to trigger, so no personal token is involved. watchdog.yml runs this
@@ -40,8 +47,12 @@ API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 HERE = Path(__file__).resolve().parent
 WORKFLOWS = HERE.parent / "workflows"
 
-# Queued this long with no runner means stuck, not waiting for a turn.
-STUCK_AFTER = timedelta(minutes=60)
+# Queued this long with no runner means stuck, not waiting for a turn. Waits of
+# an hour were normal on the 22nd; the stuck runs seen that month sat for hours.
+STUCK_AFTER = timedelta(minutes=120)
+
+# Made but not started yet.
+NOT_STARTED = {"queued", "pending", "waiting", "requested"}
 
 
 def api(method, path, body=None):
@@ -142,9 +153,11 @@ def check(repo, ref, tasks, now, dry_run):
                       f"{'would cancel' if dry_run else 'cancelling'}", flush=True)
                 if not dry_run:
                     api("POST", f"/repos/{repo}/actions/runs/{run['id']}/cancel")
+            # A run made for an earlier slot that has not started yet covers
+            # this slot too, since it fetches the latest data when it starts.
             runs = [
                 r for r in mine
-                if parse_time(r["created_at"]) >= slot
+                if (parse_time(r["created_at"]) >= slot or r["status"] in NOT_STARTED)
                 and r.get("conclusion") != "cancelled"
                 and r not in stuck
             ]
