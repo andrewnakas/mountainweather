@@ -23,7 +23,8 @@ A run that is only waiting its turn is left alone, however late it is. On the
 cancelling at 60 minutes sent each run to the back of the queue just before
 its turn came. Such a run also counts as the current slot's run: it fetches
 the latest data when it starts, so a second one behind it would only repeat
-the work.
+the work. For the same reason a late run that a runner picked up after the
+slot counts as that slot's run, however early it was made.
 
 workflow_dispatch is the one event the repository's own GITHUB_TOKEN is
 allowed to trigger, so no personal token is involved. watchdog.yml runs this
@@ -124,6 +125,33 @@ def load_tasks():
     return tasks
 
 
+def covers(repo, run, slot):
+    """Whether `run` does the work of the cron run due at `slot`.
+
+    A run fetches the latest data when a runner picks it up, so what matters
+    is when it starts, not when it was made. A run made for an earlier slot
+    covers this one if it has not started yet, or if it started after the slot
+    (on the 23rd runs waited up to an hour for a runner, and counting only the
+    time they were made dispatched a duplicate behind each of them).
+    """
+    if run.get("conclusion") == "cancelled":
+        return False
+    if parse_time(run["created_at"]) >= slot or run["status"] in NOT_STARTED:
+        return True
+    if parse_time(run["updated_at"]) < slot:
+        return False  # finished before the slot, so it started before it too
+    try:
+        jobs = api("GET", f"/repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
+    except Exception as exc:  # no answer: dispatch, a duplicate is cheaper than a gap
+        print(f"run {run['id']}: could not read its jobs: {exc!r}", flush=True)
+        return False
+    # started_at is when a runner picked the job up; jobs that were skipped
+    # never had a runner.
+    starts = [parse_time(j["started_at"]) for j in jobs
+              if j.get("runner_name") and j.get("started_at")]
+    return bool(starts) and min(starts) >= slot
+
+
 def check(repo, ref, tasks, now, dry_run):
     """One pass over every task. Returns the labels it dispatched."""
     listed = {}
@@ -154,15 +182,7 @@ def check(repo, ref, tasks, now, dry_run):
                       f"{'would cancel' if dry_run else 'cancelling'}", flush=True)
                 if not dry_run:
                     api("POST", f"/repos/{repo}/actions/runs/{run['id']}/cancel")
-            # A run made for an earlier slot that has not started yet covers
-            # this slot too, since it fetches the latest data when it starts.
-            runs = [
-                r for r in mine
-                if (parse_time(r["created_at"]) >= slot or r["status"] in NOT_STARTED)
-                and r.get("conclusion") != "cancelled"
-                and r not in stuck
-            ]
-            if runs:
+            if any(covers(repo, r, slot) for r in mine if r not in stuck):
                 continue
             print(f"{now:%H:%MZ} {task['label']}: nothing running since the {slot:%H:%MZ} slot, "
                   f"{'would dispatch' if dry_run else 'dispatching'}", flush=True)
